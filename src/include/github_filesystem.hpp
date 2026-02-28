@@ -1,0 +1,70 @@
+#pragma once
+
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/http_util.hpp"
+
+namespace duckdb {
+
+struct ParsedGHUrl {
+	string owner; // "duckdb"
+	string repo;  // "duckdb"
+	string ref;   // "main" (empty = resolve default branch)
+	string path;  // "data/csv/test.csv" (no leading slash)
+
+	static ParsedGHUrl Parse(const string &url);
+	string ToUrl() const;
+};
+
+struct GithubFileHandle : public FileHandle {
+public:
+	GithubFileHandle(FileSystem &fs, const string &path, FileOpenFlags flags);
+	void Close() override {
+	}
+
+	ParsedGHUrl parsed_url;
+	idx_t file_size = 0;
+	idx_t file_offset = 0;
+	vector<char> buffer;
+	bool loaded = false;
+};
+
+class GithubFileSystem : public FileSystem {
+public:
+	bool CanHandleFile(const string &fpath) override;
+	string GetName() const override {
+		return "GithubFileSystem";
+	}
+	bool CanSeek() override {
+		return true;
+	}
+
+	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
+	                                optional_ptr<FileOpener> opener = nullptr) override;
+
+	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
+	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
+	int64_t GetFileSize(FileHandle &handle) override;
+
+	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
+	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
+	               FileOpener *opener = nullptr) override;
+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
+
+	void Seek(FileHandle &handle, idx_t location) override;
+	idx_t SeekPosition(FileHandle &handle) override;
+
+private:
+	static string GetToken(optional_ptr<FileOpener> opener);
+	static string ResolveDefaultBranch(const string &owner, const string &repo, const string &token,
+	                                   optional_ptr<FileOpener> opener);
+	static void EnsureLoaded(GithubFileHandle &handle, optional_ptr<FileOpener> opener);
+	static string CallAPI(const string &url, const string &token, optional_ptr<FileOpener> opener,
+	                      bool *not_found = nullptr);
+	static string FetchRaw(const string &url, optional_ptr<FileOpener> opener);
+
+	void GlobRecursive(const string &owner, const string &repo, const string &ref, const string &dir,
+	                   const string &full_pattern, vector<OpenFileInfo> &results, const string &token,
+	                   optional_ptr<FileOpener> opener);
+};
+
+} // namespace duckdb

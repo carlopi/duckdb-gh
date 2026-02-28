@@ -1,9 +1,12 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "quack_extension.hpp"
+#include "github_filesystem.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/main/secret/secret.hpp"
+#include "duckdb/main/database.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
 // OpenSSL linked through vcpkg
@@ -35,6 +38,33 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto quack_openssl_version_scalar_function = ScalarFunction("quack_openssl_version", {LogicalType::VARCHAR},
 	                                                            LogicalType::VARCHAR, QuackOpenSSLVersionScalarFun);
 	loader.RegisterFunction(quack_openssl_version_scalar_function);
+
+	// Register GitHub secret type
+	SecretType github_secret_type;
+	github_secret_type.name = "github";
+	github_secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
+	github_secret_type.default_provider = "config";
+	loader.RegisterSecretType(github_secret_type);
+
+	// Register GitHub secret provider (config)
+	CreateSecretFunction github_secret_fn;
+	github_secret_fn.secret_type = "github";
+	github_secret_fn.provider = "config";
+	github_secret_fn.named_parameters["token"] = LogicalType::VARCHAR;
+	github_secret_fn.function = [](ClientContext &, CreateSecretInput &input) -> unique_ptr<BaseSecret> {
+		auto scope = input.scope.empty() ? vector<string> {"gh://"} : input.scope;
+		auto s = make_uniq<KeyValueSecret>(scope, input.type, input.provider, input.name);
+		if (input.options.count("token")) {
+			s->secret_map["token"] = input.options.at("token");
+		}
+		s->redact_keys.insert("token");
+		return unique_ptr<BaseSecret>(std::move(s));
+	};
+	loader.RegisterFunction(github_secret_fn);
+
+	// Register GitHub filesystem
+	auto &db_fs = loader.GetDatabaseInstance().GetFileSystem();
+	db_fs.RegisterSubSystem(make_uniq<GithubFileSystem>());
 }
 
 void QuackExtension::Load(ExtensionLoader &loader) {
