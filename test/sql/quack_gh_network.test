@@ -1,0 +1,43 @@
+# name: test/sql/quack_gh_network.test
+# description: test gh:// filesystem with live GitHub network access
+# group: [sql]
+
+# Skip when GITHUB_TOKEN is not set (offline CI)
+require-env GITHUB_TOKEN
+
+require quack
+
+statement ok
+SET autoinstall_known_extensions = true;
+
+statement ok
+SET autoload_known_extensions = true;
+
+# Test: explicit branch reads a known public file
+query I
+SELECT count(*) > 0 FROM read_csv('gh://duckdb/duckdb@main/README.md', header=false, columns={content: VARCHAR});
+----
+true
+
+# Test: URL without explicit branch resolves default branch and reads same content.
+# This exercises the default-branch-resolution code path (the bug that was fixed).
+query I
+SELECT md5(string_agg(content, '')) = (
+    SELECT md5(string_agg(content, ''))
+    FROM read_csv('gh://duckdb/duckdb@main/README.md', header=false, columns={content: VARCHAR})
+)
+FROM read_csv('gh://duckdb/duckdb/README.md', header=false, columns={content: VARCHAR});
+----
+true
+
+# Test: glob with explicit branch
+query I
+SELECT count(*) > 0 FROM glob('gh://duckdb/duckdb@main/data/csv/*.csv');
+----
+true
+
+# Test: glob without explicit branch (default-branch resolution)
+query I
+SELECT count(*) > 0 FROM glob('gh://duckdb/duckdb/data/csv/*.csv');
+----
+true

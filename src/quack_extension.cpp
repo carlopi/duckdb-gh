@@ -7,6 +7,7 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/extension_helper.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
 // OpenSSL linked through vcpkg
@@ -63,8 +64,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(github_secret_fn);
 
 	// Register GitHub filesystem
-	auto &db_fs = loader.GetDatabaseInstance().GetFileSystem();
+	auto &db = loader.GetDatabaseInstance();
+	auto &db_fs = db.GetFileSystem();
 	db_fs.RegisterSubSystem(make_uniq<GithubFileSystem>());
+
+	// httpfs provides the HTTPS backend needed for gh:// requests.
+	// Try to load it if it is already installed; fail silently if not.
+	ExtensionHelper::TryAutoLoadExtension(db, "httpfs");
+	ExtensionHelper::TryAutoLoadExtension(db, "json");
 }
 
 void QuackExtension::Load(ExtensionLoader &loader) {

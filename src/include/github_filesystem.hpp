@@ -52,6 +52,9 @@ public:
 
 	void Seek(FileHandle &handle, idx_t location) override;
 	idx_t SeekPosition(FileHandle &handle) override;
+	bool OnDiskFile(FileHandle &handle) override {
+		return false;
+	}
 
 private:
 	static string GetToken(optional_ptr<FileOpener> opener);

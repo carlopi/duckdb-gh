@@ -8,6 +8,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "yyjson.hpp"
 
+#include <cstdlib>
 #include <cstring>
 
 using namespace duckdb_yyjson; // NOLINT
@@ -87,18 +88,14 @@ GithubFileHandle::GithubFileHandle(FileSystem &fs, const string &path, FileOpenF
 // HTTP Helpers
 //===--------------------------------------------------------------------===//
 
-static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener) {
+static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHeaders &extra_headers,
+                                               optional_ptr<FileOpener> opener,
+                                               std::function<bool(const_data_ptr_t, idx_t)> content_handler) {
 	auto db = FileOpener::TryGetDatabase(opener);
 	if (!db) {
 		throw IOException("GitHub filesystem requires a database context");
 	}
-	return HTTPUtil::Get(*db);
-}
-
-static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHeaders &extra_headers,
-                                               optional_ptr<FileOpener> opener,
-                                               std::function<bool(const_data_ptr_t, idx_t)> content_handler) {
-	auto &http_util = GetHTTPUtil(opener);
+	auto &http_util = HTTPUtil::Get(*db);
 	FileOpenerInfo info = {url};
 	auto params = http_util.InitializeParameters(opener, &info);
 
@@ -106,9 +103,7 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 	string path_out, proto_host_port;
 	HTTPUtil::DecomposeURL(url, path_out, proto_host_port);
 
-	// Build headers
 	HTTPHeaders headers = extra_headers;
-
 	GetRequestInfo request(proto_host_port, path_out, headers, *params,
 	                       [](const HTTPResponse &) -> bool { return true; }, std::move(content_handler));
 
@@ -121,27 +116,27 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 //===--------------------------------------------------------------------===//
 
 string GithubFileSystem::GetToken(optional_ptr<FileOpener> opener) {
-	if (!opener) {
-		return "";
+	// 1. Try a DuckDB secret (CREATE SECRET ... TYPE github ...)
+	if (opener) {
+		auto sm = FileOpener::TryGetSecretManager(opener);
+		auto tx = FileOpener::TryGetCatalogTransaction(opener);
+		if (sm && tx) {
+			auto match = sm->LookupSecret(*tx, "gh://", "github");
+			if (match.HasMatch()) {
+				auto &kv = static_cast<const KeyValueSecret &>(match.GetSecret());
+				auto val = kv.TryGetValue("token");
+				if (!val.IsNull()) {
+					return val.ToString();
+				}
+			}
+		}
 	}
-	auto sm = FileOpener::TryGetSecretManager(opener);
-	if (!sm) {
-		return "";
+	// 2. Fall back to GITHUB_TOKEN environment variable
+	const char *env_token = std::getenv("GITHUB_TOKEN");
+	if (env_token && env_token[0] != '\0') {
+		return string(env_token);
 	}
-	auto tx = FileOpener::TryGetCatalogTransaction(opener);
-	if (!tx) {
-		return "";
-	}
-	auto match = sm->LookupSecret(*tx, "gh://", "github");
-	if (!match.HasMatch()) {
-		return "";
-	}
-	auto &kv = static_cast<const KeyValueSecret &>(match.GetSecret());
-	auto val = kv.TryGetValue("token");
-	if (val.IsNull()) {
-		return "";
-	}
-	return val.ToString();
+	return "";
 }
 
 string GithubFileSystem::CallAPI(const string &url, const string &token, optional_ptr<FileOpener> opener,
@@ -215,6 +210,11 @@ void GithubFileSystem::EnsureLoaded(GithubFileHandle &handle, optional_ptr<FileO
 	if (handle.loaded) {
 		return;
 	}
+	// opener must be non-null: EnsureLoaded should only be called from OpenFile
+	// where the opener is always available.
+	if (!opener) {
+		throw IOException("GithubFileSystem: cannot load '%s' without a file opener", handle.path);
+	}
 
 	auto &pu = handle.parsed_url;
 	string raw_url = "https://raw.githubusercontent.com/" + pu.owner + "/" + pu.repo + "/" + pu.ref + "/" + pu.path;
@@ -238,41 +238,22 @@ unique_ptr<FileHandle> GithubFileSystem::OpenFile(const string &path, FileOpenFl
 	auto handle = make_uniq<GithubFileHandle>(*this, path, flags);
 	handle->parsed_url = ParsedGHUrl::Parse(path);
 
-	// Resolve default branch if not specified
+	// When no ref is given, use "HEAD" — raw.githubusercontent.com resolves it to the default
+	// branch automatically, so no extra API call is needed.
 	if (handle->parsed_url.ref.empty()) {
-		string token = GetToken(opener);
-		handle->parsed_url.ref = ResolveDefaultBranch(handle->parsed_url.owner, handle->parsed_url.repo, token, opener);
+		handle->parsed_url.ref = "HEAD";
 	}
 
-	// Get file size from Contents API
-	string token = GetToken(opener);
-	auto &pu = handle->parsed_url;
-	string api_url = "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/contents/" + pu.path +
-	                 "?ref=" + pu.ref;
-	bool not_found = false;
-	string body = CallAPI(api_url, token, opener, &not_found);
-
-	if (not_found) {
-		throw IOException("GitHub file not found: %s", path);
-	}
-
-	// Parse size from JSON
-	yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
-	if (doc) {
-		yyjson_val *root = yyjson_doc_get_root(doc);
-		yyjson_val *size_val = yyjson_obj_get(root, "size");
-		if (size_val && yyjson_is_int(size_val)) {
-			handle->file_size = static_cast<idx_t>(yyjson_get_int(size_val));
-		}
-		yyjson_doc_free(doc);
-	}
+	// Eagerly download content now while we have access to the opener.
+	// Read() has no opener parameter in the FileSystem interface, so we must
+	// fetch here rather than deferring to the first Read() call.
+	EnsureLoaded(*handle, opener);
 
 	return std::move(handle);
 }
 
 void GithubFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	auto &gh = handle.Cast<GithubFileHandle>();
-	EnsureLoaded(gh, nullptr);
 
 	if (location >= gh.file_size) {
 		return;
@@ -284,7 +265,6 @@ void GithubFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 
 int64_t GithubFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &gh = handle.Cast<GithubFileHandle>();
-	EnsureLoaded(gh, nullptr);
 
 	if (gh.file_offset >= gh.file_size) {
 		return 0;
@@ -315,15 +295,15 @@ bool GithubFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 	}
 	try {
 		auto pu = ParsedGHUrl::Parse(filename);
-		string token = GetToken(opener);
-		if (pu.ref.empty()) {
-			pu.ref = ResolveDefaultBranch(pu.owner, pu.repo, token, opener);
-		}
-		string api_url = "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/contents/" + pu.path +
-		                 "?ref=" + pu.ref;
-		bool not_found = false;
-		CallAPI(api_url, token, opener, &not_found);
-		return !not_found;
+		// Use "HEAD" when no branch is given — raw.githubusercontent.com resolves it automatically.
+		const string &effective_ref = pu.ref.empty() ? "HEAD" : pu.ref;
+		// Check existence via raw.githubusercontent.com (avoids GitHub Contents API 403 / rate limits).
+		string raw_url = "https://raw.githubusercontent.com/" + pu.owner + "/" + pu.repo + "/" + effective_ref +
+		                 "/" + pu.path;
+		// Discard body — we only need the HTTP status code.
+		auto response = MakeGetRequest(raw_url, HTTPHeaders {}, opener,
+		                               [](const_data_ptr_t, idx_t) -> bool { return true; });
+		return response && response->status != HTTPStatusCode::NotFound_404 && response->Success();
 	} catch (...) {
 		return false;
 	}
@@ -339,7 +319,7 @@ bool GithubFileSystem::ListFiles(const string &directory, const std::function<vo
 		optional_ptr<FileOpener> opt_opener(opener);
 		string token = GetToken(opt_opener);
 		if (pu.ref.empty()) {
-			pu.ref = ResolveDefaultBranch(pu.owner, pu.repo, token, opt_opener);
+			pu.ref = "HEAD";
 		}
 
 		string api_url = "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/contents/" + pu.path +
@@ -449,8 +429,9 @@ vector<OpenFileInfo> GithubFileSystem::Glob(const string &path, FileOpener *open
 		auto pu = ParsedGHUrl::Parse(path);
 		optional_ptr<FileOpener> opt_opener(opener);
 		string token = GetToken(opt_opener);
+		// Use "HEAD" when no branch is given — GitHub API and raw.githubusercontent.com both accept it.
 		if (pu.ref.empty()) {
-			pu.ref = ResolveDefaultBranch(pu.owner, pu.repo, token, opt_opener);
+			pu.ref = "HEAD";
 		}
 
 		// Build canonical pattern with resolved ref
