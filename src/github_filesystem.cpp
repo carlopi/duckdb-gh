@@ -99,12 +99,22 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 	FileOpenerInfo info = {url};
 	auto params = http_util.InitializeParameters(opener, &info);
 
+        auto client_context = FileOpener::TryGetClientContext(opener);
+        if (client_context) {
+                auto &client_config = ClientConfig::GetConfig(*client_context);
+                if (client_config.enable_http_logging) {
+                        params->logger = client_context->logger;
+                }
+        }
+
+
 	// Decompose URL into endpoint + path
 	string path_out, proto_host_port;
 	HTTPUtil::DecomposeURL(url, path_out, proto_host_port);
 
 	HTTPHeaders headers = extra_headers;
-	GetRequestInfo request(proto_host_port, path_out, headers, *params,
+	std::cout << proto_host_port << "\t" << path_out << "\n";
+	GetRequestInfo request(proto_host_port + path_out, extra_headers, *params,
 	                       [](const HTTPResponse &) -> bool { return true; }, std::move(content_handler));
 
 	auto client = http_util.InitializeClient(*params, proto_host_port);
@@ -144,6 +154,7 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 	HTTPHeaders headers;
 	headers.Insert("Accept", "application/vnd.github+json");
 	headers.Insert("X-GitHub-Api-Version", "2022-11-28");
+headers.Insert("User-Agent", "HOHOHO");
 	if (!token.empty()) {
 		headers.Insert("Authorization", "Bearer " + token);
 	}
