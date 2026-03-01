@@ -378,6 +378,42 @@ bool GithubFileSystem::ListFiles(const string &directory, const std::function<vo
 // GithubGlobResult – LazyMultiFileList using Contents API
 //===--------------------------------------------------------------------===//
 
+// Segment-by-segment glob match. When completed=false the key is treated as a
+// prefix: if all key segments are consumed before the pattern is exhausted the
+// function returns true, meaning the directory *could* still lead to a match.
+// Used to prune subdirectories that can never contribute a matching file.
+static bool SegmentMatch(vector<string>::const_iterator key, vector<string>::const_iterator key_end,
+                         vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end,
+                         bool completed) {
+	if (key == key_end && !completed) {
+		return true;
+	}
+	while (key != key_end && pattern != pattern_end) {
+		if (*pattern == "**") {
+			if (std::next(pattern) == pattern_end) {
+				return true;
+			}
+			pattern++;
+			while (key != key_end) {
+				if (SegmentMatch(key, key_end, pattern, pattern_end, completed)) {
+					return true;
+				}
+				key++;
+			}
+			return !completed;
+		}
+		if (!::duckdb::Glob(key->data(), key->length(), pattern->data(), pattern->length())) {
+			return false;
+		}
+		key++;
+		pattern++;
+	}
+	if (pattern != pattern_end && !completed) {
+		return true;
+	}
+	return key == key_end && pattern == pattern_end;
+}
+
 // Each ExpandNextPath() call processes one directory from the queue using the
 // Contents API, expanding files that match the glob and enqueuing subdirs.
 struct GithubGlobResult : public LazyMultiFileList {
@@ -393,8 +429,9 @@ private:
 
 	// Resolved at construction
 	ParsedGHUrl parsed_url;
-	string full_pattern; // canonical pattern with ref for glob matching
+	string full_pattern;         // canonical pattern with ref for glob matching
 	string token;
+	vector<string> pattern_splits; // parsed_url.path split by '/' for SegmentMatch
 
 	mutable vector<string> pending_dirs; // BFS queue of repo-relative dir paths
 };
@@ -417,6 +454,7 @@ GithubGlobResult::GithubGlobResult(GithubFileSystem &fs_p, const string &glob_pa
 
 	full_pattern = "gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref + "/" + parsed_url.path;
 	token = GithubFileSystem::GetToken(opener);
+	pattern_splits = StringUtil::Split(parsed_url.path, "/");
 
 	// Seed the BFS queue with the base dir (path before first wildcard)
 	auto star_pos = parsed_url.path.find_first_of("*?[");
@@ -470,7 +508,12 @@ bool GithubGlobResult::ExpandNextPath() const {
 			continue;
 		}
 		if (strcmp(type_str, "dir") == 0) {
-			pending_dirs.push_back(entry_path);
+			// Only recurse if the directory path can still lead to a match
+			auto key_splits = StringUtil::Split(entry_path, "/");
+			if (SegmentMatch(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
+			                 false)) {
+				pending_dirs.push_back(entry_path);
+			}
 		} else if (strcmp(type_str, "file") == 0) {
 			string full_url =
 			    "gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref + "/" + entry_path;
