@@ -122,7 +122,7 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 	//   CALL enable_logging('HTTP');
 	//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/**/*.csv');
 	//   SELECT count(*) FROM duckdb_logs() WHERE type = 'HTTP';
-	// Expected: one entry per API request (O(depth)+1 for the Trees strategy).
+	// Expected: one entry per API request (2 for the Trees strategy).
 	auto client_context = FileOpener::TryGetClientContext(opener);
 	if (client_context) {
 		params->logger = client_context->logger;
@@ -796,25 +796,7 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 // GlobFilesExtended – dispatch to Trees or BFS strategy
 //===--------------------------------------------------------------------===//
 
-// TODO: add tests that verify the number of API requests made by each strategy.
-// HTTP logging works end-to-end (MakeGetRequest routes through HTTPUtil::Request →
-// SendRequest → LogRequest).  Use duckdb_logs() to count requests:
-//
-//   -- BFS: one request per visited directory. For the crawl fixture under d10
-//   -- the traversal visits: d10, d20/d21/d22, their mid/ dirs, and d40/d41/d42
-//   -- under each mid/ — total should be predictable and bounded.
-//   CALL enable_logging('HTTP');
-//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/d/d00/d10/*/*/*/*.csv');
-//   SELECT count(*) FROM duckdb_logs() WHERE type = 'HTTP';  -- expect N BFS requests
-//
-//   -- Trees: O(depth) requests to navigate to base_dir + 1 recursive tree fetch.
-//   -- For a pattern like data/csv/glob/**/*.csv the base_dir is data/csv/glob,
-//   -- so expect 3 navigation requests + 1 recursive fetch = 4 total.
-//   CALL enable_logging('HTTP');
-//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/**/*.csv');
-//   SELECT count(*) FROM duckdb_logs() WHERE type = 'HTTP';  -- expect 4 requests
-//
-// TODO (depends on request-count tests above): verify that LIMIT pushdown keeps the
+// TODO: verify that LIMIT pushdown keeps the
 // number of API requests small for BFS globs over large trees.
 // Because GithubGlobResult is a LazyMultiFileList, DuckDB only calls ExpandNextPath()
 // until enough files have been collected to satisfy the LIMIT — remaining directories
@@ -844,32 +826,34 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 //   SELECT count(*) AS trees_full FROM duckdb_logs() WHERE type = 'HTTP';
 //   -- trees_limited should equal trees_full (both O(depth)+1)
 
-// TODO: reduce overall request counts for both strategies.
+// TODO (future work): reduce BFS request count using the GitHub GraphQL API.
 //
-// Trees API (** patterns) — from (depth+1) GETs to 1 GET:
-//   The current impl navigates to base_dir level-by-level (see ExpandNextPath
-//   TODO in GithubTreesGlobResult).  The fix is a single Contents API call on
-//   the PARENT of base_dir, which returns its children including a "sha" entry
-//   for base_dir itself; that sha feeds directly into the one recursive tree call.
-//   For a root-level pattern (base_dir empty) only the recursive tree call is
-//   needed — already 1 GET.  For all other patterns: 1 parent Contents call +
-//   1 recursive tree = 2 GETs instead of (depth+1)+1.
+// The GitHub REST API has no batch endpoint — each /contents/{path} call fetches
+// exactly one directory.  The GraphQL API does not have this limitation: multiple
+// tree lookups can be aliased inside a single POST to api.github.com/graphql,
+// collapsing an entire BFS level into one round-trip.
 //
-// BFS (* patterns) — reduce visits per level by switching to git/trees:
-//   Each Contents API response already returns the tree SHA of every child
-//   directory.  Subsequent BFS levels can call GET /git/trees/{sha} (non-
-//   recursive) instead of GET /contents/{path}, reusing those SHAs rather than
-//   re-resolving them via path.  This avoids redundant path-to-SHA resolution
-//   but does not by itself reduce the total number of API calls (still one call
-//   per visited directory).
-//   A more aggressive optimisation: once a BFS level has only matching dirs left
-//   (no pruning possible at that level) issue a single recursive git/trees call
-//   for one representative dir, confirm the sub-structure matches expectations,
-//   then apply the same filter to siblings without fetching them individually.
-//   In practice for the d10/*/*/*/.csv fixture this would reduce 16 calls to ~5
-//   (fetch d10, fetch one representative subtree recursively, infer the rest).
-//   This requires the assumption that sibling directories are structurally similar,
-//   which holds for generated datasets but not in general.
+// Example: after processing d10 and discovering children d20, d21, d22, instead
+// of three separate REST calls the BFS could issue one GraphQL request:
+//
+//   query {
+//     repository(owner: "duckdb", name: "duckdb") {
+//       d20: object(expression: "main:…/d10/d20") { …on Tree { entries { name type oid } } }
+//       d21: object(expression: "main:…/d10/d21") { …on Tree { entries { name type oid } } }
+//       d22: object(expression: "main:…/d10/d22") { …on Tree { entries { name type oid } } }
+//     }
+//   }
+//
+// This reduces BFS to one request per level instead of one request per directory.
+// For the d10/*/*/*/*.csv fixture the 16 REST calls would become ~4 GraphQL calls
+// (one per BFS depth level).
+//
+// Implementation considerations:
+//   - Requires POST to https://api.github.com/graphql with a JSON body.
+//   - The GraphQL endpoint always requires authentication (no unauthenticated access).
+//   - The query must be built dynamically, one alias per pending directory.
+//   - Response parsing changes from a JSON array to a map of aliased objects.
+//   - GraphQL and REST rate limits are tracked separately by GitHub.
 unique_ptr<MultiFileList> GithubFileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
                                                               optional_ptr<FileOpener> opener) {
 	// '**' means unlimited depth — no directory pruning is possible, so pay
