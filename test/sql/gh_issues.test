@@ -1,0 +1,99 @@
+# name: test/sql/gh_issues.test
+# description: test gh_issues() against the live GitHub API
+# group: [sql]
+
+require-env GITHUB_TOKEN
+
+require gh
+
+statement ok
+SET autoinstall_known_extensions = true;
+
+statement ok
+SET autoload_known_extensions = true;
+
+# ── basic open issues (default state) ────────────────────────────────────────
+
+# duckdb/duckdb always has open issues
+query I
+SELECT count(*) > 0 FROM gh_issues('duckdb/duckdb');
+----
+true
+
+# all returned rows have state = 'open' when using the default
+query I
+SELECT count(*) = count(*) FILTER (WHERE state = 'open')
+FROM gh_issues('duckdb/duckdb');
+----
+true
+
+# key columns are non-null
+query I
+SELECT count(*) = count(*) FILTER (WHERE number IS NOT NULL AND title IS NOT NULL AND html_url IS NOT NULL)
+FROM gh_issues('duckdb/duckdb');
+----
+true
+
+# ── state := 'closed' and state := 'all' ─────────────────────────────────────
+# Use a smaller repo (duckdb/duckdb-wasm) so we don't exceed GitHub's REST API
+# pagination limit, which throws 422 for repos with very large issue counts.
+
+query I
+SELECT count(*) > 0 FROM gh_issues('duckdb/duckdb-wasm', state := 'closed');
+----
+true
+
+query I
+SELECT count(*) = count(*) FILTER (WHERE state = 'closed')
+FROM gh_issues('duckdb/duckdb-wasm', state := 'closed');
+----
+true
+
+# 'all' returns at least as many rows as 'open' alone
+query I
+SELECT (SELECT count(*) FROM gh_issues('duckdb/duckdb-wasm', state := 'all')) >=
+       (SELECT count(*) FROM gh_issues('duckdb/duckdb-wasm', state := 'open'));
+----
+true
+
+# ── pull requests are excluded ────────────────────────────────────────────────
+
+# html_url for issues always contains /issues/, never /pull/
+query I
+SELECT count(*) = 0 FROM gh_issues('duckdb/duckdb')
+WHERE html_url LIKE '%/pull/%';
+----
+true
+
+# ── labels and assignees are lists ───────────────────────────────────────────
+
+query I
+SELECT typeof(labels) FROM gh_issues('duckdb/duckdb') LIMIT 1;
+----
+VARCHAR[]
+
+query I
+SELECT typeof(assignees) FROM gh_issues('duckdb/duckdb') LIMIT 1;
+----
+VARCHAR[]
+
+# ── error: glob patterns are not supported ────────────────────────────────────
+
+statement error
+SELECT * FROM gh_issues('duckdb/*');
+----
+glob patterns are not supported
+
+# ── error: invalid state value ────────────────────────────────────────────────
+
+statement error
+SELECT * FROM gh_issues('duckdb/duckdb', state := 'invalid');
+----
+invalid state 'invalid'
+
+# ── error: repository not found ───────────────────────────────────────────────
+
+statement error
+SELECT * FROM gh_issues('duckdb/this-repo-does-not-exist-xyz');
+----
+not found

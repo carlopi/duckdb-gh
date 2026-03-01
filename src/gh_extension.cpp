@@ -80,6 +80,27 @@ static void LoadInternal(ExtensionLoader &loader) {
 		loader.RegisterFunction(std::move(info));
 	}
 
+	// Register gh_issues('owner/repo') with inline description and examples
+	{
+		CreateTableFunctionInfo info(GithubIssuesFunction());
+		FunctionDescription desc;
+		desc.parameter_names = {"repo"};
+		desc.parameter_types = {LogicalType::VARCHAR};
+		desc.description =
+		    "Fetches GitHub issues for a repository as a table, one row per issue. "
+		    "Pull requests are excluded. Paginates automatically. "
+		    "The optional 'state' parameter filters by issue state: "
+		    "'open' (default), 'closed', or 'all'.";
+		desc.examples = {
+		    "SELECT number, title, user FROM gh_issues('duckdb/duckdb');",
+		    "SELECT number, title FROM gh_issues('duckdb/duckdb', state := 'closed') ORDER BY closed_at DESC;",
+		    "SELECT count(*) FROM gh_issues('duckdb/duckdb', state := 'all');",
+		};
+		desc.categories = {"github"};
+		info.descriptions.push_back(std::move(desc));
+		loader.RegisterFunction(std::move(info));
+	}
+
 	// Register GitHub filesystem
 	auto &db = loader.GetDatabaseInstance();
 	auto &db_fs = db.GetFileSystem();

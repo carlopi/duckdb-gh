@@ -10,4 +10,7 @@ TableFunction GithubRepoFunction();
 // gh_repos((SELECT ...)) — table in-out, one row per input 'owner/repo'
 TableFunction GithubReposFunction();
 
+// gh_issues('owner/repo') — paginated issue listing (excludes pull requests)
+TableFunction GithubIssuesFunction();
+
 } // namespace duckdb

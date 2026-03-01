@@ -404,6 +404,241 @@ static OperatorResultType GithubReposInOut(ExecutionContext &context, TableFunct
 }
 
 //===--------------------------------------------------------------------===//
+// gh_issues('<org>/<repo>') — paginated issue listing
+//
+// SQL usage:
+//   SELECT * FROM gh_issues('duckdb/duckdb');
+//   SELECT number, title FROM gh_issues('duckdb/duckdb', state := 'closed');
+//   SELECT * FROM gh_issues('duckdb/duckdb', state := 'all');
+//
+// Returns one row per issue (pull requests are excluded).
+// Paginates automatically — one API call per 100 issues.
+// Default state is 'open'. Valid values: 'open', 'closed', 'all'.
+//===--------------------------------------------------------------------===//
+
+static void SetIssueOutputSchema(vector<LogicalType> &return_types, vector<string> &names) {
+	names = {"number",     "title",   "state",      "state_reason", "body",       "user",
+	         "labels",     "assignees", "milestone", "locked",       "comments",   "created_at",
+	         "updated_at", "closed_at", "html_url"};
+
+	return_types = {
+	    LogicalType::BIGINT,                    // number
+	    LogicalType::VARCHAR,                   // title
+	    LogicalType::VARCHAR,                   // state
+	    LogicalType::VARCHAR,                   // state_reason (nullable)
+	    LogicalType::VARCHAR,                   // body (nullable)
+	    LogicalType::VARCHAR,                   // user (login)
+	    LogicalType::LIST(LogicalType::VARCHAR), // labels
+	    LogicalType::LIST(LogicalType::VARCHAR), // assignees
+	    LogicalType::VARCHAR,                   // milestone (nullable)
+	    LogicalType::BOOLEAN,                   // locked
+	    LogicalType::BIGINT,                    // comments
+	    LogicalType::TIMESTAMP,                 // created_at
+	    LogicalType::TIMESTAMP,                 // updated_at
+	    LogicalType::TIMESTAMP,                 // closed_at (nullable)
+	    LogicalType::VARCHAR,                   // html_url
+	};
+}
+
+static void ParseIssueRow(yyjson_val *item, DataChunk &output, idx_t row) {
+	output.SetValue(0, row, GetIntVal(item, "number"));
+	output.SetValue(1, row, GetStrVal(item, "title"));
+	output.SetValue(2, row, GetStrVal(item, "state"));
+	output.SetValue(3, row, GetStrVal(item, "state_reason"));
+	output.SetValue(4, row, GetStrVal(item, "body"));
+
+	// user.login
+	{
+		yyjson_val *user = yyjson_obj_get(item, "user");
+		Value user_val(LogicalType::VARCHAR);
+		if (user && !yyjson_is_null(user)) {
+			yyjson_val *login = yyjson_obj_get(user, "login");
+			if (login && yyjson_is_str(login)) {
+				user_val = Value(yyjson_get_str(login));
+			}
+		}
+		output.SetValue(5, row, user_val);
+	}
+
+	// labels[].name
+	{
+		vector<Value> labels;
+		yyjson_val *arr = yyjson_obj_get(item, "labels");
+		if (arr && yyjson_is_arr(arr)) {
+			yyjson_val *lbl;
+			size_t i, m;
+			yyjson_arr_foreach(arr, i, m, lbl) {
+				yyjson_val *name = yyjson_obj_get(lbl, "name");
+				if (name && yyjson_is_str(name)) {
+					labels.emplace_back(Value(yyjson_get_str(name)));
+				}
+			}
+		}
+		output.SetValue(6, row, Value::LIST(LogicalType::VARCHAR, labels));
+	}
+
+	// assignees[].login
+	{
+		vector<Value> assignees;
+		yyjson_val *arr = yyjson_obj_get(item, "assignees");
+		if (arr && yyjson_is_arr(arr)) {
+			yyjson_val *a;
+			size_t i, m;
+			yyjson_arr_foreach(arr, i, m, a) {
+				yyjson_val *login = yyjson_obj_get(a, "login");
+				if (login && yyjson_is_str(login)) {
+					assignees.emplace_back(Value(yyjson_get_str(login)));
+				}
+			}
+		}
+		output.SetValue(7, row, Value::LIST(LogicalType::VARCHAR, assignees));
+	}
+
+	// milestone.title
+	{
+		yyjson_val *ms = yyjson_obj_get(item, "milestone");
+		Value ms_val(LogicalType::VARCHAR);
+		if (ms && !yyjson_is_null(ms)) {
+			yyjson_val *title = yyjson_obj_get(ms, "title");
+			if (title && yyjson_is_str(title)) {
+				ms_val = Value(yyjson_get_str(title));
+			}
+		}
+		output.SetValue(8, row, ms_val);
+	}
+
+	output.SetValue(9, row, GetBoolVal(item, "locked"));
+	output.SetValue(10, row, GetIntVal(item, "comments"));
+	output.SetValue(11, row, ParseTimestampVal(yyjson_obj_get(item, "created_at")));
+	output.SetValue(12, row, ParseTimestampVal(yyjson_obj_get(item, "updated_at")));
+	output.SetValue(13, row, ParseTimestampVal(yyjson_obj_get(item, "closed_at")));
+	output.SetValue(14, row, GetStrVal(item, "html_url"));
+}
+
+struct GithubIssuesBindData : public TableFunctionData {
+	string token;
+	string owner;
+	string repo;
+	string state; // "open", "closed", or "all"
+};
+
+struct GithubIssuesScanState : public GlobalTableFunctionState {
+	int page = 1;
+	bool done = false;
+};
+
+static unique_ptr<FunctionData> GithubIssuesBind(ClientContext &context, TableFunctionBindInput &input,
+                                                  vector<LogicalType> &return_types, vector<string> &names) {
+	SetIssueOutputSchema(return_types, names);
+
+	auto repo_str = input.inputs[0].ToString();
+	auto slash = repo_str.find('/');
+	if (slash == string::npos) {
+		throw InvalidInputException("gh_issues: expected '<org>/<repo>', got '%s'", repo_str);
+	}
+	if (repo_str.find_first_of("*?[") != string::npos) {
+		throw InvalidInputException("gh_issues: glob patterns are not supported; expected '<org>/<repo>'");
+	}
+
+	string state_val = "open";
+	auto it = input.named_parameters.find("state");
+	if (it != input.named_parameters.end() && !it->second.IsNull()) {
+		state_val = it->second.ToString();
+		if (state_val != "open" && state_val != "closed" && state_val != "all") {
+			throw InvalidInputException(
+			    "gh_issues: invalid state '%s'; expected 'open', 'closed', or 'all'", state_val);
+		}
+	}
+
+	ClientContextFileOpener opener(context);
+	auto bind_data = make_uniq<GithubIssuesBindData>();
+	bind_data->token = GithubFileSystem::GetToken(&opener);
+	bind_data->owner = repo_str.substr(0, slash);
+	bind_data->repo = repo_str.substr(slash + 1);
+	bind_data->state = state_val;
+	return bind_data;
+}
+
+static unique_ptr<GlobalTableFunctionState> GithubIssuesInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<GithubIssuesScanState>();
+}
+
+static void GithubIssuesScan(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind = data_p.bind_data->Cast<GithubIssuesBindData>();
+	auto &state = data_p.global_state->Cast<GithubIssuesScanState>();
+
+	if (state.done) {
+		output.SetCardinality(0);
+		return;
+	}
+
+	ClientContextFileOpener opener(context);
+	string url = "https://api.github.com/repos/" + bind.owner + "/" + bind.repo +
+	             "/issues?state=" + bind.state + "&per_page=100&page=" + std::to_string(state.page);
+
+	bool not_found = false;
+	string body;
+	try {
+		body = GithubFileSystem::CallAPI(url, bind.token, &opener, &not_found);
+	} catch (IOException &e) {
+		// GitHub returns 422 Unprocessable when the page offset exceeds its internal
+		// limit for this endpoint. Re-raise with actionable guidance.
+		string msg(e.what());
+		if (msg.find("Unprocessable") != string::npos) {
+			throw IOException(
+			    "gh_issues: GitHub REST API pagination limit reached for '%s/%s' (state='%s'). "
+			    "The REST API cannot return results beyond a certain offset. "
+			    "Try narrowing the result set: use state='open' or state='closed' instead of 'all'.",
+			    bind.owner, bind.repo, bind.state);
+		}
+		throw;
+	}
+	if (not_found) {
+		throw IOException("gh_issues: repository '%s/%s' not found", bind.owner, bind.repo);
+	}
+	if (body.empty()) {
+		state.done = true;
+		output.SetCardinality(0);
+		return;
+	}
+
+	yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
+	if (!doc) {
+		state.done = true;
+		output.SetCardinality(0);
+		return;
+	}
+	yyjson_val *arr = yyjson_doc_get_root(doc);
+	if (!yyjson_is_arr(arr)) {
+		yyjson_doc_free(doc);
+		state.done = true;
+		output.SetCardinality(0);
+		return;
+	}
+
+	idx_t api_count = yyjson_arr_size(arr);
+	idx_t out_row = 0;
+	yyjson_val *item;
+	size_t idx, max;
+	yyjson_arr_foreach(arr, idx, max, item) {
+		// The issues endpoint returns pull requests too; skip them.
+		yyjson_val *pr = yyjson_obj_get(item, "pull_request");
+		if (pr && !yyjson_is_null(pr)) {
+			continue;
+		}
+		ParseIssueRow(item, output, out_row++);
+	}
+	output.SetCardinality(out_row);
+	yyjson_doc_free(doc);
+
+	if (api_count < 100) {
+		state.done = true;
+	} else {
+		state.page++;
+	}
+}
+
+//===--------------------------------------------------------------------===//
 // Factories
 //===--------------------------------------------------------------------===//
 
@@ -417,6 +652,13 @@ TableFunction GithubReposFunction() {
 	TableFunction fn("gh_repos", {LogicalType::TABLE}, nullptr, GithubReposBind);
 	fn.in_out_function = GithubReposInOut;
 	fn.init_global = GithubReposInit;
+	return fn;
+}
+
+TableFunction GithubIssuesFunction() {
+	TableFunction fn("gh_issues", {LogicalType::VARCHAR}, GithubIssuesScan, GithubIssuesBind);
+	fn.init_global = GithubIssuesInit;
+	fn.named_parameters["state"] = LogicalType::VARCHAR;
 	return fn;
 }
 
