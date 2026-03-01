@@ -246,8 +246,7 @@ static string FetchFileContent(const string &owner, const string &repo, const st
 	//   (a) the Authorization header is forwarded → private repos work, and
 	//   (b) raw bytes are returned directly without base64 encoding.
 	// This works for files of any size supported by GitHub (up to ~100 MB).
-	string api_url =
-	    "https://api.github.com/repos/" + owner + "/" + repo + "/contents/" + path + "?ref=" + ref;
+	string api_url = "https://api.github.com/repos/" + owner + "/" + repo + "/contents/" + path + "?ref=" + ref;
 	HTTPHeaders headers;
 	headers.Insert("Accept", "application/vnd.github.raw");
 	headers.Insert("X-GitHub-Api-Version", "2022-11-28");
@@ -405,8 +404,7 @@ bool GithubFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 		if (!token.empty()) {
 			headers.Insert("Authorization", "Bearer " + token);
 		}
-		auto response =
-		    MakeGetRequest(api_url, headers, opener, [](const_data_ptr_t, idx_t) -> bool { return false; });
+		auto response = MakeGetRequest(api_url, headers, opener, [](const_data_ptr_t, idx_t) -> bool { return false; });
 		return response && response->status == HTTPStatusCode::OK_200;
 	} catch (...) {
 		return false;
