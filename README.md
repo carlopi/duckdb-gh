@@ -1,5 +1,7 @@
 # duckdb-gh
 
+> **Experimental:** this extension is in early development. APIs, behaviour, and URL formats may change without notice. Use with caution.
+
 A [DuckDB](https://duckdb.org) extension that adds a `gh://` filesystem, letting you read files and glob repository contents directly from GitHub inside any DuckDB query — no manual downloading required.
 
 ## URL format
