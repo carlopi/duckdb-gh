@@ -305,6 +305,16 @@ unique_ptr<FileHandle> GithubFileSystem::OpenFile(const string &path, FileOpenFl
 
 	// When no ref is given, use "HEAD" — raw.githubusercontent.com resolves it to the default
 	// branch automatically, so no extra API call is needed.
+	// The same pattern is repeated in FileExists, GithubGlobResult, and GithubTreesGlobResult.
+	//
+	// TODO: verify behaviour when a repository has a branch literally named "HEAD" (or "head").
+	// Passing ref=HEAD to raw.githubusercontent.com / the GitHub Contents API should always
+	// resolve to the symbolic HEAD (i.e. the default branch), but if GitHub instead prefers
+	// an exact branch match the wrong content would be returned silently.
+	// Set up a dedicated test repo that has a non-default branch called "HEAD", then run:
+	//   SELECT * FROM 'gh://org/repo/file.csv';          -- should read default branch
+	//   SELECT * FROM 'gh://org/repo@HEAD/file.csv';     -- ambiguous: branch or symbolic?
+	// If the results differ, we should call ResolveDefaultBranch() instead of hard-coding "HEAD".
 	if (handle->parsed_url.ref.empty()) {
 		handle->parsed_url.ref = "HEAD";
 	}
