@@ -796,36 +796,6 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 // GlobFilesExtended – dispatch to Trees or BFS strategy
 //===--------------------------------------------------------------------===//
 
-// TODO: verify that LIMIT pushdown keeps the
-// number of API requests small for BFS globs over large trees.
-// Because GithubGlobResult is a LazyMultiFileList, DuckDB only calls ExpandNextPath()
-// until enough files have been collected to satisfy the LIMIT — remaining directories
-// are never visited. A LIMIT 10 on a glob that would otherwise touch hundreds of
-// directories should therefore issue far fewer requests than the unlimited version.
-// The Trees strategy is unaffected (it always makes O(depth)+1 calls regardless of
-// LIMIT), but for BFS the saving should be dramatic on deep/wide repos.
-// Suggested test (once logging works):
-//
-//   -- BFS pattern: early termination should stop directory traversal after 10 files
-//   CALL enable_logging('HTTP');
-//   SELECT file FROM glob('gh://duckdb/duckdb@main/*/*/*') LIMIT 10;
-//   SELECT count(*) AS bfs_limited FROM duckdb_logs() WHERE type = 'HTTP';
-//   -- vs. without LIMIT:
-//   CALL enable_logging('HTTP');
-//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/*/*/*');
-//   SELECT count(*) AS bfs_full FROM duckdb_logs() WHERE type = 'HTTP';
-//   -- bfs_limited should be dramatically smaller than bfs_full
-//
-//   -- Trees pattern: LIMIT has no effect on request count (always O(depth)+1),
-//   -- but confirm no extra requests are made either:
-//   CALL enable_logging('HTTP');
-//   SELECT file FROM glob('gh://duckdb/duckdb@main/**') LIMIT 10;
-//   SELECT count(*) AS trees_limited FROM duckdb_logs() WHERE type = 'HTTP';
-//   CALL enable_logging('HTTP');
-//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/**');
-//   SELECT count(*) AS trees_full FROM duckdb_logs() WHERE type = 'HTTP';
-//   -- trees_limited should equal trees_full (both O(depth)+1)
-
 // TODO (future work): reduce BFS request count using the GitHub GraphQL API.
 //
 // The GitHub REST API has no batch endpoint — each /contents/{path} call fetches
