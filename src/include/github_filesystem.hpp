@@ -61,6 +61,9 @@ public:
 	bool OnDiskFile(FileHandle &handle) override {
 		return false;
 	}
+	timestamp_t GetLastModifiedTime(FileHandle &handle) override {
+		return timestamp_t(0);
+	}
 
 	// Public so GithubGlobResult can call them
 	static string GetToken(optional_ptr<FileOpener> opener);
