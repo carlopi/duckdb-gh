@@ -79,3 +79,41 @@ SELECT
     (SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/d/d00/d10/d20/mid/d40/*.csv'));
 ----
 true
+
+# ── HTTP request-count verification ──────────────────────────────────────────
+# Verify that each glob strategy makes the expected number of API calls and
+# uses only GET requests (never HEAD, POST, or PUT).
+#
+# Trees API (** pattern): O(depth)+1 calls.  Base dir is data/csv/glob → 3
+# navigation requests (data, csv, glob) + 1 recursive tree fetch = 4 total.
+#
+# BFS (* pattern): one Contents API call per visited directory.  The pattern
+# data/csv/glob/crawl/d/d00/d10/*/*/*/*.csv visits 16 directories total.
+
+statement ok
+CALL enable_logging('HTTP');
+
+query I
+SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/**/*.csv');
+----
+174
+
+query I
+SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/d/d00/d10/*/*/*/*.csv');
+----
+9
+
+query IIIII
+FROM (
+    FROM duckdb_logs_parsed('HTTP')
+    SELECT count(*),
+           sum(request.type == 'HEAD') head,
+           sum(request.type == 'GET')  get,
+           sum(request.type == 'POST') post,
+           sum(request.type == 'PUT')  put
+    GROUP BY context_id
+    ORDER BY context_id
+) WHERE post == 0;
+----
+4	0	4	0	0
+16	0	16	0	0
