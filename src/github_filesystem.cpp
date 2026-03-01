@@ -240,28 +240,30 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 	return body;
 }
 
-string GithubFileSystem::FetchRaw(const string &url, optional_ptr<FileOpener> opener) {
-	// TODO: verify private-repository access.
-	// raw.githubusercontent.com also requires authentication for private repos, but this
-	// function currently sends no Authorization header.  The token should be forwarded here
-	// just like CallAPI does.  Additionally, GitHub returns HTTP 404 (not 401/403) for
-	// private-repo requests made without a valid token, so a missing/wrong token silently
-	// looks like a missing file rather than an auth error — the error message should hint
-	// at this when a 404 is received and no token is configured.
-	// Suggested test: create a private repo, add a file, and verify that:
-	//   (a) SELECT * FROM 'gh://org/private-repo@main/file.csv'; fails with a clear message
-	//       when no token is set, and succeeds once a token is configured via CREATE SECRET.
-	//   (b) glob('gh://org/private-repo@main/**/*.csv') works end-to-end (both FetchRaw
-	//       and CallAPI paths are exercised).
+static string FetchFileContent(const string &owner, const string &repo, const string &ref, const string &path,
+                               const string &token, optional_ptr<FileOpener> opener) {
+	// Use the Contents API with the raw media type so that:
+	//   (a) the Authorization header is forwarded → private repos work, and
+	//   (b) raw bytes are returned directly without base64 encoding.
+	// This works for files of any size supported by GitHub (up to ~100 MB).
+	string api_url =
+	    "https://api.github.com/repos/" + owner + "/" + repo + "/contents/" + path + "?ref=" + ref;
 	HTTPHeaders headers;
+	headers.Insert("Accept", "application/vnd.github.raw");
+	headers.Insert("X-GitHub-Api-Version", "2022-11-28");
+	if (!token.empty()) {
+		headers.Insert("Authorization", "Bearer " + token);
+	}
 	string body;
-	auto response = MakeGetRequest(url, headers, opener, [&body](const_data_ptr_t data, idx_t len) -> bool {
+	auto response = MakeGetRequest(api_url, headers, opener, [&body](const_data_ptr_t data, idx_t len) -> bool {
 		body.append(reinterpret_cast<const char *>(data), len);
 		return true;
 	});
-
+	if (response->status == HTTPStatusCode::NotFound_404) {
+		throw IOException("File not found: gh://%s/%s@%s/%s", owner, repo, ref, path);
+	}
 	if (!response->Success()) {
-		throw IOException("Failed to fetch raw content from %s: %s", url, response->GetError());
+		throw IOException("Failed to fetch gh://%s/%s@%s/%s: %s", owner, repo, ref, path, response->GetError());
 	}
 	return body;
 }
@@ -301,8 +303,8 @@ void GithubFileSystem::EnsureLoaded(GithubFileHandle &handle, optional_ptr<FileO
 	}
 
 	auto &pu = handle.parsed_url;
-	string raw_url = "https://raw.githubusercontent.com/" + pu.owner + "/" + pu.repo + "/" + pu.ref + "/" + pu.path;
-	string content = FetchRaw(raw_url, opener);
+	string token = GetToken(opener);
+	string content = FetchFileContent(pu.owner, pu.repo, pu.ref, pu.path, token, opener);
 
 	handle.buffer.assign(content.begin(), content.end());
 	handle.file_size = handle.buffer.size();
@@ -322,12 +324,12 @@ unique_ptr<FileHandle> GithubFileSystem::OpenFile(const string &path, FileOpenFl
 	auto handle = make_uniq<GithubFileHandle>(*this, path, flags);
 	handle->parsed_url = ParsedGHUrl::Parse(path);
 
-	// When no ref is given, use "HEAD" — raw.githubusercontent.com resolves it to the default
-	// branch automatically, so no extra API call is needed.
+	// When no ref is given, use "HEAD" — the GitHub Contents API resolves it to the
+	// default branch automatically, so no extra API call is needed.
 	// The same pattern is repeated in FileExists, GithubGlobResult, and GithubTreesGlobResult.
 	//
 	// TODO: verify behaviour when a repository has a branch literally named "HEAD" (or "head").
-	// Passing ref=HEAD to raw.githubusercontent.com / the GitHub Contents API should always
+	// Passing ref=HEAD to the GitHub Contents API should always
 	// resolve to the symbolic HEAD (i.e. the default branch), but if GitHub instead prefers
 	// an exact branch match the wrong content would be returned silently.
 	// Set up a dedicated test repo that has a non-default branch called "HEAD", then run:
@@ -389,15 +391,23 @@ bool GithubFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 	}
 	try {
 		auto pu = ParsedGHUrl::Parse(filename);
-		// Use "HEAD" when no branch is given — raw.githubusercontent.com resolves it automatically.
 		const string &effective_ref = pu.ref.empty() ? "HEAD" : pu.ref;
-		// Check existence via raw.githubusercontent.com (avoids GitHub Contents API 403 / rate limits).
-		string raw_url =
-		    "https://raw.githubusercontent.com/" + pu.owner + "/" + pu.repo + "/" + effective_ref + "/" + pu.path;
-		// Discard body — we only need the HTTP status code.
+		string token = GetToken(opener);
+		// Use the Contents API with raw media type so the auth token is forwarded
+		// (private repos) and all file sizes are handled correctly.  We only need
+		// the HTTP status code, so the content handler aborts after the first chunk —
+		// the status is set from response headers before any body arrives.
+		string api_url = "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/contents/" + pu.path +
+		                 "?ref=" + effective_ref;
+		HTTPHeaders headers;
+		headers.Insert("Accept", "application/vnd.github.raw");
+		headers.Insert("X-GitHub-Api-Version", "2022-11-28");
+		if (!token.empty()) {
+			headers.Insert("Authorization", "Bearer " + token);
+		}
 		auto response =
-		    MakeGetRequest(raw_url, HTTPHeaders {}, opener, [](const_data_ptr_t, idx_t) -> bool { return true; });
-		return response && response->status != HTTPStatusCode::NotFound_404 && response->Success();
+		    MakeGetRequest(api_url, headers, opener, [](const_data_ptr_t, idx_t) -> bool { return false; });
+		return response && response->status == HTTPStatusCode::OK_200;
 	} catch (...) {
 		return false;
 	}

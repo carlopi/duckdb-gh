@@ -74,7 +74,6 @@ private:
 	static string ResolveDefaultBranch(const string &owner, const string &repo, const string &token,
 	                                   optional_ptr<FileOpener> opener);
 	static void EnsureLoaded(GithubFileHandle &handle, optional_ptr<FileOpener> opener);
-	static string FetchRaw(const string &url, optional_ptr<FileOpener> opener);
 };
 
 } // namespace duckdb
