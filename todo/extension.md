@@ -84,3 +84,44 @@ calls.
 - The query must be built dynamically, one alias per pending directory in the current BFS frontier.
 - Response parsing changes from a flat JSON array to a map of aliased objects.
 - GraphQL and REST API rate limits are tracked separately by GitHub.
+
+---
+
+## 4 — gh_repo / gh_repos: batch metadata fetching
+
+**Location:** `src/github_functions.cpp` — `FetchAndParseRepo`, `GithubRepoScan`, `GithubReposInOut`
+
+Both `gh_repo('owner/repo')` and `gh_repos((table))` currently issue one `GET /repos/{owner}/{repo}`
+request per row.  For large inputs this is slow and burns API rate limit quota quickly.
+
+**Potential batch approaches:**
+
+### GitHub GraphQL API
+
+A single `POST https://api.github.com/graphql` can alias multiple repository lookups:
+
+```graphql
+query {
+  r0: repository(owner: "duckdb",   name: "duckdb")    { name stargazerCount ... }
+  r1: repository(owner: "duckdb",   name: "pg_duckdb") { name stargazerCount ... }
+  r2: repository(owner: "carlopi",  name: "duckdb-gh")  { name stargazerCount ... }
+}
+```
+
+This collapses N repos into a single round-trip, subject only to GraphQL query complexity limits
+(GitHub allows up to ~100 aliases per query in practice).  The response is a JSON object keyed by
+alias; rows can be extracted in the same order as the aliases.
+
+**Implementation considerations:**
+- Requires building a dynamic GraphQL query string (one alias per repo).
+- Requires `POST` with a `{"query": "..."}` JSON body — `CallAPI` currently only does `GET`.
+- Response parsing: navigate `data.r0`, `data.r1`, … rather than a flat array.
+- The GraphQL endpoint **always requires authentication**; unauthenticated calls are rejected.
+- GraphQL and REST rate limits are tracked separately by GitHub.
+- Batch size should be capped (e.g. 100 aliases per request) with multiple requests for larger inputs.
+
+### REST: no true batch endpoint exists
+
+The GitHub REST API has no `POST /repos/batch` or equivalent.  The only REST-level optimisation
+is parallelising independent `GET /repos/{owner}/{repo}` calls, which DuckDB's parallel execution
+context could support if the in-out / scan functions are made thread-safe.

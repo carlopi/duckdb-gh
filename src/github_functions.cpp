@@ -61,11 +61,11 @@ static Value ParseTimestampVal(yyjson_val *v) {
 //===--------------------------------------------------------------------===//
 
 static void SetRepoOutputSchema(vector<LogicalType> &return_types, vector<string> &names) {
-	names = {"name",      "full_name",        "description",   "owner",             "private",
-	         "fork",      "archived",         "disabled",      "visibility",        "default_branch",
-	         "language",  "license",          "homepage",      "html_url",          "topics",
+	names = {"name",      "full_name",          "description",     "owner",             "private",
+	         "fork",      "archived",           "disabled",        "visibility",        "default_branch",
+	         "language",  "license",            "homepage",        "html_url",          "topics",
 	         "stargazers_count", "watchers_count", "forks_count", "open_issues_count", "size",
-	         "created_at", "updated_at",      "pushed_at"};
+	         "created_at", "updated_at",        "pushed_at"};
 
 	return_types = {
 	    LogicalType::VARCHAR,                   // name
@@ -92,6 +92,82 @@ static void SetRepoOutputSchema(vector<LogicalType> &return_types, vector<string
 	    LogicalType::TIMESTAMP,                 // updated_at
 	    LogicalType::TIMESTAMP,                 // pushed_at
 	};
+}
+
+//===--------------------------------------------------------------------===//
+// Glob expansion: list all repos for an owner
+//
+// Input format: "owner/*" — owner is literal, repo part must be exactly "*".
+// Returns a vector of "owner/repo" strings.
+//
+// Tries /orgs/{owner}/repos first; on 404 falls back to /users/{owner}/repos.
+// Paginates with per_page=100 until a page returns fewer than 100 entries.
+//===--------------------------------------------------------------------===//
+
+static vector<string> ListAllRepos(const string &owner, const string &token, optional_ptr<FileOpener> opener) {
+	vector<string> result;
+
+	// Determine listing endpoint: orgs (first) or users (fallback on 404)
+	string base_url;
+	{
+		bool not_found = false;
+		string probe = "https://api.github.com/orgs/" + owner + "/repos?per_page=1";
+		GithubFileSystem::CallAPI(probe, token, opener, &not_found);
+		base_url = not_found ? ("https://api.github.com/users/" + owner + "/repos")
+		                     : ("https://api.github.com/orgs/" + owner + "/repos");
+	}
+
+	for (int page = 1;; page++) {
+		string url = base_url + "?per_page=100&page=" + std::to_string(page);
+		bool not_found = false;
+		string body = GithubFileSystem::CallAPI(url, token, opener, &not_found);
+		if (not_found || body.empty()) {
+			break;
+		}
+
+		yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
+		if (!doc) {
+			break;
+		}
+		yyjson_val *arr = yyjson_doc_get_root(doc);
+		if (!yyjson_is_arr(arr)) {
+			yyjson_doc_free(doc);
+			break;
+		}
+
+		idx_t count = yyjson_arr_size(arr);
+		yyjson_val *item;
+		size_t idx, max;
+		yyjson_arr_foreach(arr, idx, max, item) {
+			yyjson_val *name_val = yyjson_obj_get(item, "name");
+			if (name_val && yyjson_is_str(name_val)) {
+				result.push_back(owner + "/" + yyjson_get_str(name_val));
+			}
+		}
+		yyjson_doc_free(doc);
+
+		if (count < 100) {
+			break; // last page
+		}
+	}
+
+	return result;
+}
+
+// Parse "owner/repo_part" and expand if repo_part == "*".
+// Returns the full list of "owner/repo" strings to fetch.
+static vector<string> ExpandRepoPattern(const string &pattern, const string &token, optional_ptr<FileOpener> opener) {
+	auto slash = pattern.find('/');
+	if (slash == string::npos) {
+		throw InvalidInputException("gh_repo: expected 'owner/repo' or 'owner/*', got '%s'", pattern);
+	}
+	string owner = pattern.substr(0, slash);
+	string repo_part = pattern.substr(slash + 1);
+
+	if (repo_part == "*") {
+		return ListAllRepos(owner, token, opener);
+	}
+	return {pattern};
 }
 
 //===--------------------------------------------------------------------===//
@@ -180,16 +256,21 @@ static void FetchAndParseRepo(const string &repo_str, const string &token, optio
 }
 
 //===--------------------------------------------------------------------===//
-// gh_repo('owner/repo') — single VARCHAR, regular table function
+// gh_repo('owner/repo' | 'owner/*') — single VARCHAR, regular table function
+//
+// 'owner/*' expands to all repos for the owner; emits one row per repo.
+// 'owner/repo' fetches exactly one repo.
 //===--------------------------------------------------------------------===//
 
 struct GithubRepoBindData : public TableFunctionData {
 	string token;
-	string repo_str;
+	string pattern; // raw input, may be "owner/*"
 };
 
 struct GithubRepoScanState : public GlobalTableFunctionState {
-	bool done = false;
+	bool expanded = false;
+	vector<string> repos; // after expansion
+	idx_t current = 0;
 };
 
 static unique_ptr<FunctionData> GithubRepoBind(ClientContext &context, TableFunctionBindInput &input,
@@ -198,7 +279,7 @@ static unique_ptr<FunctionData> GithubRepoBind(ClientContext &context, TableFunc
 	ClientContextFileOpener opener(context);
 	auto bind_data = make_uniq<GithubRepoBindData>();
 	bind_data->token = GithubFileSystem::GetToken(&opener);
-	bind_data->repo_str = input.inputs[0].ToString();
+	bind_data->pattern = input.inputs[0].ToString();
 	return bind_data;
 }
 
@@ -209,22 +290,42 @@ static unique_ptr<GlobalTableFunctionState> GithubRepoInit(ClientContext &, Tabl
 static void GithubRepoScan(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind = data_p.bind_data->Cast<GithubRepoBindData>();
 	auto &state = data_p.global_state->Cast<GithubRepoScanState>();
-	if (state.done) {
+
+	// Expand the pattern once on first call
+	if (!state.expanded) {
+		state.expanded = true;
+		ClientContextFileOpener opener(context);
+		state.repos = ExpandRepoPattern(bind.pattern, bind.token, &opener);
+	}
+
+	if (state.current >= state.repos.size()) {
 		output.SetCardinality(0);
 		return;
 	}
-	state.done = true;
+
 	ClientContextFileOpener opener(context);
-	FetchAndParseRepo(bind.repo_str, bind.token, &opener, output, 0);
-	output.SetCardinality(1);
+	idx_t out_row = 0;
+	while (state.current < state.repos.size() && out_row < STANDARD_VECTOR_SIZE) {
+		FetchAndParseRepo(state.repos[state.current++], bind.token, &opener, output, out_row++);
+	}
+	output.SetCardinality(out_row);
 }
 
 //===--------------------------------------------------------------------===//
-// gh_repos((table)) — table in-out, one row per input 'owner/repo'
+// gh_repos((table)) — table in-out, one row per input 'owner/repo' or 'owner/*'
+//
+// 'owner/*' in an input row expands to all repos; HAVE_MORE_OUTPUT is used
+// when one input chunk produces more output rows than STANDARD_VECTOR_SIZE.
 //===--------------------------------------------------------------------===//
 
 struct GithubReposBindData : public TableFunctionData {
 	string token;
+};
+
+struct GithubReposGlobalState : public GlobalTableFunctionState {
+	vector<string> pending;      // expanded repos waiting to be fetched
+	idx_t current = 0;
+	bool chunk_processed = false; // whether current input chunk was expanded
 };
 
 static unique_ptr<FunctionData> GithubReposBind(ClientContext &context, TableFunctionBindInput &input,
@@ -239,15 +340,40 @@ static unique_ptr<FunctionData> GithubReposBind(ClientContext &context, TableFun
 	return bind_data;
 }
 
+static unique_ptr<GlobalTableFunctionState> GithubReposInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<GithubReposGlobalState>();
+}
+
 static OperatorResultType GithubReposInOut(ExecutionContext &context, TableFunctionInput &data, DataChunk &input,
                                            DataChunk &output) {
 	auto &bind = data.bind_data->Cast<GithubReposBindData>();
+	auto &state = data.global_state->Cast<GithubReposGlobalState>();
 	ClientContextFileOpener opener(context.client);
+
+	// First call for this input chunk: expand all patterns into pending list
+	if (!state.chunk_processed) {
+		state.pending.clear();
+		state.current = 0;
+		state.chunk_processed = true;
+		for (idx_t i = 0; i < input.size(); i++) {
+			auto expanded = ExpandRepoPattern(input.data[0].GetValue(i).ToString(), bind.token, &opener);
+			for (auto &r : expanded) {
+				state.pending.push_back(std::move(r));
+			}
+		}
+	}
+
+	// Emit up to STANDARD_VECTOR_SIZE rows from the pending list
 	idx_t out_row = 0;
-	for (idx_t i = 0; i < input.size(); i++) {
-		FetchAndParseRepo(input.data[0].GetValue(i).ToString(), bind.token, &opener, output, out_row++);
+	while (state.current < state.pending.size() && out_row < STANDARD_VECTOR_SIZE) {
+		FetchAndParseRepo(state.pending[state.current++], bind.token, &opener, output, out_row++);
 	}
 	output.SetCardinality(out_row);
+
+	if (state.current < state.pending.size()) {
+		return OperatorResultType::HAVE_MORE_OUTPUT; // still draining this chunk
+	}
+	state.chunk_processed = false; // ready for the next input chunk
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
@@ -264,6 +390,7 @@ TableFunction GithubRepoFunction() {
 TableFunction GithubReposFunction() {
 	TableFunction fn("gh_repos", {LogicalType::TABLE}, nullptr, GithubReposBind);
 	fn.in_out_function = GithubReposInOut;
+	fn.init_global = GithubReposInit;
 	return fn;
 }
 

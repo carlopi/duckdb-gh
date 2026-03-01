@@ -12,66 +12,88 @@ SET autoinstall_known_extensions = true;
 statement ok
 SET autoload_known_extensions = true;
 
-# ── gh_repo('owner/repo') — single VARCHAR argument ──────────────────────────
+# ── gh_repo('owner/repo') — single repo ──────────────────────────────────────
 
-# full_name round-trips
 query I
 SELECT full_name FROM gh_repo('duckdb/duckdb');
 ----
 duckdb/duckdb
 
-# owner field is extracted from owner.login
 query I
 SELECT owner FROM gh_repo('duckdb/duckdb');
 ----
 duckdb
 
-# Non-private public repo
 query I
 SELECT "private" FROM gh_repo('duckdb/duckdb');
 ----
 false
 
-# Language
 query I
 SELECT language FROM gh_repo('duckdb/duckdb');
 ----
 C++
 
-# Numeric field is non-negative
 query I
 SELECT stargazers_count > 0 FROM gh_repo('duckdb/duckdb');
 ----
 true
 
-# Timestamp is non-null
 query I
 SELECT created_at IS NOT NULL FROM gh_repo('duckdb/duckdb');
 ----
 true
 
-# ── gh_repos((table)) — table in-out ─────────────────────────────────────────
+# ── gh_repo('owner/*') — glob expands to all repos for owner ─────────────────
 
-# Single repo via VALUES
+# carlopi/* returns more than one repo
+query I
+SELECT count(*) > 1 FROM gh_repo('carlopi/*');
+----
+true
+
+# every row has a non-empty full_name of the form 'carlopi/...'
+query I
+SELECT count(*) = count(*) FILTER (WHERE full_name LIKE 'carlopi/%')
+FROM gh_repo('carlopi/*');
+----
+true
+
+# ── gh_repos((table)) — single repo via VALUES ───────────────────────────────
+
 query I
 SELECT full_name FROM gh_repos((VALUES ('duckdb/duckdb')));
 ----
 duckdb/duckdb
 
-# Multiple repos: correct row count
 query I
 SELECT count(*) FROM gh_repos((VALUES ('duckdb/duckdb'), ('duckdb/pg_duckdb')));
 ----
 2
 
-# Multiple repos: names are correct
 query I
 SELECT name FROM gh_repos((VALUES ('duckdb/duckdb'), ('duckdb/pg_duckdb'))) ORDER BY name;
 ----
 duckdb
 pg_duckdb
 
-# From a subquery
+# ── gh_repos((table)) — glob row mixed with exact row ────────────────────────
+
+# glob expands carlopi/* plus one exact repo → total > 1
+query I
+SELECT count(*) > 1 FROM gh_repos((VALUES ('carlopi/*'), ('duckdb/duckdb')));
+----
+true
+
+# duckdb/duckdb row always present regardless of carlopi/* expansion
+query I
+SELECT count(*) > 0 FROM gh_repos((VALUES ('carlopi/*'), ('duckdb/duckdb')))
+WHERE full_name = 'duckdb/duckdb';
+----
+true
+
+# ── gh_repos from a subquery ──────────────────────────────────────────────────
+
 query I
 SELECT count(*) FROM gh_repos((SELECT unnest(['duckdb/duckdb', 'duckdb/duckdb-wasm'])));
 ----
