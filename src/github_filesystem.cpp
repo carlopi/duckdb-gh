@@ -114,7 +114,6 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 	HTTPUtil::DecomposeURL(url, path_out, proto_host_port);
 
 	HTTPHeaders headers = extra_headers;
-		std::cout << proto_host_port << "\t" << path_out << "\n";
 	GetRequestInfo request(proto_host_port + path_out, extra_headers, *params,
 	                       [](const HTTPResponse &) -> bool { return true; }, std::move(content_handler));
 
@@ -547,9 +546,9 @@ private:
 	mutable bool finished = false;
 
 	ParsedGHUrl parsed_url;
-	string full_pattern; // canonical pattern with ref for glob matching
 	string token;
-	string path_prefix; // base_dir + "/" used for cheap pre-filter
+	string path_prefix;           // base_dir + "/" (used to reconstruct full repo path from relative entry)
+	vector<string> pattern_splits; // parsed_url.path split by '/' for SegmentMatch
 };
 
 GithubTreesGlobResult::GithubTreesGlobResult(GithubFileSystem &fs_p, const string &glob_pattern,
@@ -561,10 +560,10 @@ GithubTreesGlobResult::GithubTreesGlobResult(GithubFileSystem &fs_p, const strin
 		parsed_url.ref = "HEAD";
 	}
 
-	full_pattern = "gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref + "/" + parsed_url.path;
 	token = GithubFileSystem::GetToken(opener);
+	pattern_splits = StringUtil::Split(parsed_url.path, "/");
 
-	// Derive the longest literal prefix before the first wildcard for cheap filtering
+	// Derive the longest literal prefix before the first wildcard for navigation
 	auto star_pos = parsed_url.path.find_first_of("*?[");
 	string base_dir;
 	if (star_pos != string::npos) {
@@ -576,16 +575,67 @@ GithubTreesGlobResult::GithubTreesGlobResult(GithubFileSystem &fs_p, const strin
 	path_prefix = base_dir.empty() ? "" : (base_dir + "/");
 }
 
+// Fetch the git tree object at `tree_sha` (non-recursive) and find the SHA of
+// the direct child named `segment`. Returns empty string if not found.
+static string FindChildTreeSha(GithubFileSystem &fs, const ParsedGHUrl &pu, const string &tree_sha,
+                               const string &segment, const string &token, optional_ptr<FileOpener> opener) {
+	string api_url =
+	    "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/git/trees/" + tree_sha;
+	bool not_found = false;
+	string body = fs.CallAPI(api_url, token, opener, &not_found);
+	if (not_found || body.empty()) {
+		return "";
+	}
+	yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
+	if (!doc) {
+		return "";
+	}
+	yyjson_val *root = yyjson_doc_get_root(doc);
+	yyjson_val *tree_arr = yyjson_obj_get(root, "tree");
+	string child_sha;
+	if (tree_arr && yyjson_is_arr(tree_arr)) {
+		yyjson_val *item;
+		size_t idx, max;
+		yyjson_arr_foreach(tree_arr, idx, max, item) {
+			yyjson_val *path_val = yyjson_obj_get(item, "path");
+			yyjson_val *sha_val = yyjson_obj_get(item, "sha");
+			if (!path_val || !sha_val) {
+				continue;
+			}
+			if (segment == yyjson_get_str(path_val)) {
+				child_sha = yyjson_get_str(sha_val);
+				break;
+			}
+		}
+	}
+	yyjson_doc_free(doc);
+	return child_sha;
+}
+
 bool GithubTreesGlobResult::ExpandNextPath() const {
 	if (finished) {
 		return false;
 	}
 	finished = true;
 
-	// Single call: GET /repos/{owner}/{repo}/git/trees/{ref}?recursive=1
-	string api_url = "https://api.github.com/repos/" + parsed_url.owner + "/" + parsed_url.repo + "/git/trees/" +
-	                 parsed_url.ref + "?recursive=1";
+	// Navigate to base_dir level-by-level to obtain its tree SHA, then fetch
+	// only that subtree recursively. Fetching from the repo root would trigger
+	// GitHub's truncation limit on large repos and miss deeply nested files.
+	string tree_sha = parsed_url.ref;
+	if (!path_prefix.empty()) {
+		// path_prefix = base_dir + "/"; strip the trailing slash to get segments
+		auto segments = StringUtil::Split(path_prefix.substr(0, path_prefix.size() - 1), "/");
+		for (const auto &segment : segments) {
+			tree_sha = FindChildTreeSha(fs, parsed_url, tree_sha, segment, token, opener);
+			if (tree_sha.empty()) {
+				return false; // base_dir does not exist
+			}
+		}
+	}
 
+	// One recursive fetch scoped to the base_dir subtree
+	string api_url = "https://api.github.com/repos/" + parsed_url.owner + "/" + parsed_url.repo +
+	                 "/git/trees/" + tree_sha + "?recursive=1";
 	bool not_found = false;
 	string body = fs.CallAPI(api_url, token, opener, &not_found);
 	if (not_found || body.empty()) {
@@ -616,13 +666,14 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 		if (!type_str || !entry_path || strcmp(type_str, "blob") != 0) {
 			continue;
 		}
-		if (!path_prefix.empty() && !StringUtil::StartsWith(entry_path, path_prefix)) {
-			continue;
-		}
-		string full_url =
-		    "gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref + "/" + entry_path;
-		if (::duckdb::Glob(full_url.c_str(), full_url.size(), full_pattern.c_str(), full_pattern.size())) {
-			expanded_files.emplace_back(full_url);
+		// entry_path is relative to base_dir; prepend path_prefix for the full repo path.
+		// Use SegmentMatch (not duckdb::Glob) so that '**' correctly matches zero path
+		// components — e.g. pattern 'd10/**/*.csv' must match 'd10/file.csv'.
+		string full_repo_path = path_prefix + entry_path;
+		auto path_segs = StringUtil::Split(full_repo_path, "/");
+		if (SegmentMatch(path_segs.begin(), path_segs.end(), pattern_splits.begin(), pattern_splits.end(), true)) {
+			expanded_files.emplace_back("gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref +
+			                            "/" + full_repo_path);
 		}
 	}
 	yyjson_doc_free(doc);

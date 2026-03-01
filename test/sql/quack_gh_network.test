@@ -30,14 +30,43 @@ FROM read_csv('gh://duckdb/duckdb/README.md', header=false, columns={content: VA
 ----
 true
 
-# Test: glob with explicit branch
+# ── BFS strategy (single-level wildcard, no '**') ────────────────────────────
+# Uses Contents API one directory at a time with SegmentMatch pruning.
+
+# Test: single-* glob with explicit branch (BFS path)
 query I
 SELECT count(*) > 0 FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/d/d00/d10/*.csv');
 ----
 true
 
-# Test: glob without explicit branch (default-branch resolution)
+# Test: single-* glob without explicit branch (BFS path, default-branch resolution)
 query I
 SELECT count(*) > 0 FROM glob('gh://duckdb/duckdb/data/csv/glob/crawl/d/d00/d10/*.csv');
+----
+true
+
+# ── Trees API strategy ('**' pattern) ────────────────────────────────────────
+# Uses GET /git/trees/{ref}?recursive=1 — a single API call for the subtree.
+
+# Test: ** glob returns results (Trees API path)
+query I
+SELECT count(*) > 0 FROM glob('gh://duckdb/duckdb@main/data/csv/glob/**/*.csv');
+----
+true
+
+# Test: ** glob without explicit branch (Trees API path, default-branch resolution)
+query I
+SELECT count(*) > 0 FROM glob('gh://duckdb/duckdb/data/csv/glob/**/*.csv');
+----
+true
+
+# ── Cross-check: both strategies agree on a leaf directory ───────────────────
+# d40 has no subdirectories, so '*.csv' (BFS) and '**/*.csv' (Trees) must
+# match exactly the same set of files (** matches zero path components here).
+query I
+SELECT
+    (SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/d/d00/d10/d20/mid/d40/**/*.csv'))
+    =
+    (SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/d/d00/d10/d20/mid/d40/*.csv'));
 ----
 true
