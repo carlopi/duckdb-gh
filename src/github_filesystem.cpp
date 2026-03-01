@@ -113,7 +113,6 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 	HTTPUtil::DecomposeURL(url, path_out, proto_host_port);
 
 	HTTPHeaders headers = extra_headers;
-	std::cout << proto_host_port << "\t" << path_out << "\n";
 	GetRequestInfo request(proto_host_port + path_out, extra_headers, *params,
 	                       [](const HTTPResponse &) -> bool { return true; }, std::move(content_handler));
 
