@@ -320,6 +320,9 @@ bool GithubFileSystem::CanHandleFile(const string &fpath) {
 
 unique_ptr<FileHandle> GithubFileSystem::OpenFile(const string &path, FileOpenFlags flags,
                                                   optional_ptr<FileOpener> opener) {
+	if (flags.OpenForWriting()) {
+		throw IOException("GithubFileSystem is read-only: cannot open '%s' for writing", path);
+	}
 	auto handle = make_uniq<GithubFileHandle>(*this, path, flags);
 	handle->parsed_url = ParsedGHUrl::Parse(path);
 
@@ -342,7 +345,16 @@ unique_ptr<FileHandle> GithubFileSystem::OpenFile(const string &path, FileOpenFl
 	// Eagerly download content now while we have access to the opener.
 	// Read() has no opener parameter in the FileSystem interface, so we must
 	// fetch here rather than deferring to the first Read() call.
-	EnsureLoaded(*handle, opener);
+	if (flags.ReturnNullIfNotExists()) {
+		try {
+			EnsureLoaded(*handle, opener);
+		} catch (IOException &) {
+			// File not found — caller requested null-on-missing rather than an error.
+			return nullptr;
+		}
+	} else {
+		EnsureLoaded(*handle, opener);
+	}
 
 	return std::move(handle);
 }

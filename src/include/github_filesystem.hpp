@@ -65,6 +65,12 @@ public:
 		return timestamp_t(0);
 	}
 
+	string CanonicalizePath(const string &path, optional_ptr<FileOpener> opener = nullptr) override {
+		// gh:// URLs are already canonical; skip the base-class split/join that
+		// drops the second slash from "gh://" → "gh:/".
+		return path;
+	}
+
 	// Public so GithubGlobResult can call them
 	static string GetToken(optional_ptr<FileOpener> opener);
 	static string CallAPI(const string &url, const string &token, optional_ptr<FileOpener> opener,

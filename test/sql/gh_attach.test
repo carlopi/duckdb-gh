@@ -1,0 +1,45 @@
+# name: test/sql/gh_attach.test
+# description: test ATTACH with gh:// URLs
+# group: [sql]
+
+# Skip when GITHUB_TOKEN is not set (offline CI)
+require-env GITHUB_TOKEN
+
+require gh
+
+statement ok
+SET autoinstall_known_extensions = true;
+
+statement ok
+SET autoload_known_extensions = true;
+
+# ── Plain ATTACH (read-write) errors ─────────────────────────────────────────
+# GithubFileSystem is read-only.  Plain ATTACH (default: read-write) fails
+# immediately when DuckDB tries to open the database file for writing.
+
+statement error
+ATTACH 'gh://duckdb/duckdb@main/test/sql/storage_version/storage_version.dbtest.duckdb' AS gh_db;
+----
+GithubFileSystem is read-only
+
+# ── ATTACH (READ_ONLY) succeeds ───────────────────────────────────────────────
+# The file is downloaded, the checkpoint is loaded, and DuckDB reports the
+# database as read-only.
+
+statement ok
+ATTACH 'gh://duckdb/duckdb@main/test/sql/storage_version/storage_version.dbtest.duckdb' AS gh_db (READ_ONLY);
+
+query II
+SELECT database_name, readonly FROM duckdb_databases() WHERE database_name = 'gh_db';
+----
+gh_db	true
+
+# Write attempts are rejected by DuckDB's own read-only guard (not the filesystem).
+
+statement error
+CREATE TABLE gh_db.main.oops (x INT);
+----
+Cannot execute statement of type "CREATE" on database "gh_db" which is attached in read-only mode
+
+statement ok
+DETACH gh_db;
