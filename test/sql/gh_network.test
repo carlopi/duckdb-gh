@@ -1,4 +1,4 @@
-# name: test/sql/quack_gh_network.test
+# name: test/sql/gh_network.test
 # description: test gh:// filesystem with live GitHub network access
 # group: [sql]
 

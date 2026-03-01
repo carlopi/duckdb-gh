@@ -1,4 +1,4 @@
-# name: test/sql/quack.test
+# name: test/sql/gh.test
 # description: test gh extension
 # group: [sql]
 
