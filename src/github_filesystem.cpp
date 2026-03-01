@@ -101,13 +101,22 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 	FileOpenerInfo info = {url};
 	auto params = http_util.InitializeParameters(opener, &info);
 
-        auto client_context = FileOpener::TryGetClientContext(opener);
-        if (client_context) {
-                auto &client_config = ClientConfig::GetConfig(*client_context);
-                if (client_config.enable_http_logging) {
-                        params->logger = client_context->logger;
-                }
-        }
+	// TODO: verify HTTP logging works end-to-end.
+	// Suspected issue: the FileOpener / ClientContext chain may not be threaded through
+	// correctly for all call sites (e.g. GithubGlobResult::ExpandNextPath, which stores
+	// the opener at construction time but runs lazily). Suggested test:
+	//   CALL enable_logging('HTTP');
+	//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/**/*.csv');
+	//   SELECT * FROM duckdb_logs() WHERE type = 'HTTP';
+	// Expected: one log entry per API request. If 0 entries are produced the opener/logger
+	// is not being forwarded properly and needs to be re-examined.
+	auto client_context = FileOpener::TryGetClientContext(opener);
+	if (client_context) {
+		auto &client_config = ClientConfig::GetConfig(*client_context);
+		if (client_config.enable_http_logging) {
+			params->logger = client_context->logger;
+		}
+	}
 
 
 	// Decompose URL into endpoint + path
@@ -155,6 +164,10 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 	HTTPHeaders headers;
 	headers.Insert("Accept", "application/vnd.github+json");
 	headers.Insert("X-GitHub-Api-Version", "2022-11-28");
+	// TODO: verify whether the User-Agent should come from HTTPUtil automatically
+	// (it does in httpfs when HTTPUtil is initialised correctly via InitializeParameters).
+	// If the opener / ClientContext chain is set up properly, HTTPUtil may already
+	// inject a DuckDB User-Agent and this explicit header can be removed.
 	headers.Insert("User-Agent", "duckdb-gh-extension");
 	if (!token.empty()) {
 		headers.Insert("Authorization", "Bearer " + token);
@@ -729,6 +742,24 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 //===--------------------------------------------------------------------===//
 // GlobFilesExtended – dispatch to Trees or BFS strategy
 //===--------------------------------------------------------------------===//
+
+// TODO: add tests that verify the number of API requests made by each strategy.
+// Once HTTP logging is confirmed working (see the TODO in MakeGetRequest), use
+// duckdb_logs() to count requests:
+//
+//   -- BFS: one request per visited directory. For the crawl fixture under d10
+//   -- the traversal visits: d10, d20/d21/d22, their mid/ dirs, and d40/d41/d42
+//   -- under each mid/ — total should be predictable and bounded.
+//   CALL enable_logging('HTTP');
+//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/d/d00/d10/*/*/*/*.csv');
+//   SELECT count(*) FROM duckdb_logs() WHERE type = 'HTTP';  -- expect N BFS requests
+//
+//   -- Trees: O(depth) requests to navigate to base_dir + 1 recursive tree fetch.
+//   -- For a pattern like data/csv/glob/**/*.csv the base_dir is data/csv/glob,
+//   -- so expect 3 navigation requests + 1 recursive fetch = 4 total.
+//   CALL enable_logging('HTTP');
+//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/**/*.csv');
+//   SELECT count(*) FROM duckdb_logs() WHERE type = 'HTTP';  -- expect 4 requests
 
 unique_ptr<MultiFileList> GithubFileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
                                                                optional_ptr<FileOpener> opener) {
