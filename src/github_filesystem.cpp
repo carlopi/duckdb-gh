@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_opener.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/main/secret/secret.hpp"
@@ -373,24 +374,86 @@ bool GithubFileSystem::ListFiles(const string &directory, const std::function<vo
 	}
 }
 
-void GithubFileSystem::GlobRecursive(const string &owner, const string &repo, const string &ref, const string &dir,
-                                      const string &full_pattern, vector<OpenFileInfo> &results, const string &token,
-                                      optional_ptr<FileOpener> opener) {
-	string api_url = "https://api.github.com/repos/" + owner + "/" + repo + "/contents/" + dir + "?ref=" + ref;
+//===--------------------------------------------------------------------===//
+// GithubGlobResult – LazyMultiFileList using Contents API
+//===--------------------------------------------------------------------===//
+
+// Each ExpandNextPath() call processes one directory from the queue using the
+// Contents API, expanding files that match the glob and enqueuing subdirs.
+struct GithubGlobResult : public LazyMultiFileList {
+public:
+	GithubGlobResult(GithubFileSystem &fs, const string &glob_pattern, optional_ptr<FileOpener> opener);
+
+protected:
+	bool ExpandNextPath() const override;
+
+private:
+	GithubFileSystem &fs;
+	optional_ptr<FileOpener> opener;
+
+	// Resolved at construction
+	ParsedGHUrl parsed_url;
+	string full_pattern; // canonical pattern with ref for glob matching
+	string token;
+
+	mutable vector<string> pending_dirs; // BFS queue of repo-relative dir paths
+};
+
+GithubGlobResult::GithubGlobResult(GithubFileSystem &fs_p, const string &glob_pattern,
+                                   optional_ptr<FileOpener> opener_p)
+    : LazyMultiFileList(FileOpener::TryGetClientContext(opener_p)), fs(fs_p), opener(opener_p) {
+
+	if (!FileSystem::HasGlob(glob_pattern)) {
+		if (fs.FileExists(glob_pattern, opener)) {
+			expanded_files.emplace_back(glob_pattern);
+		}
+		return; // all_files_expanded will be set when ExpandNextPath returns false
+	}
+
+	parsed_url = ParsedGHUrl::Parse(glob_pattern);
+	if (parsed_url.ref.empty()) {
+		parsed_url.ref = "HEAD";
+	}
+
+	full_pattern = "gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref + "/" + parsed_url.path;
+	token = GithubFileSystem::GetToken(opener);
+
+	// Seed the BFS queue with the base dir (path before first wildcard)
+	auto star_pos = parsed_url.path.find_first_of("*?[");
+	string base_dir;
+	if (star_pos != string::npos) {
+		auto last_slash = parsed_url.path.rfind('/', star_pos);
+		base_dir = (last_slash != string::npos) ? parsed_url.path.substr(0, last_slash) : "";
+	} else {
+		base_dir = parsed_url.path;
+	}
+	pending_dirs.push_back(base_dir);
+}
+
+bool GithubGlobResult::ExpandNextPath() const {
+	if (pending_dirs.empty()) {
+		return false;
+	}
+
+	string dir = pending_dirs.back();
+	pending_dirs.pop_back();
+
+	string api_url = "https://api.github.com/repos/" + parsed_url.owner + "/" + parsed_url.repo + "/contents/" + dir +
+	                 "?ref=" + parsed_url.ref;
 	bool not_found = false;
-	string body = CallAPI(api_url, token, opener, &not_found);
+	string body = fs.CallAPI(api_url, token, opener, &not_found);
 	if (not_found || body.empty()) {
-		return;
+		return !pending_dirs.empty();
 	}
 
 	yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
 	if (!doc) {
-		return;
+		return !pending_dirs.empty();
 	}
 	yyjson_val *arr = yyjson_doc_get_root(doc);
 	if (!yyjson_is_arr(arr)) {
 		yyjson_doc_free(doc);
-		return;
+		return !pending_dirs.empty();
 	}
 
 	yyjson_val *item;
@@ -402,70 +465,27 @@ void GithubFileSystem::GlobRecursive(const string &owner, const string &repo, co
 			continue;
 		}
 		const char *type_str = yyjson_get_str(type_val);
-		const char *file_path = yyjson_get_str(path_val);
-		if (!type_str || !file_path) {
+		const char *entry_path = yyjson_get_str(path_val);
+		if (!type_str || !entry_path) {
 			continue;
 		}
-
-		string full_url = "gh://" + owner + "/" + repo + "@" + ref + "/" + file_path;
-
 		if (strcmp(type_str, "dir") == 0) {
-			GlobRecursive(owner, repo, ref, file_path, full_pattern, results, token, opener);
+			pending_dirs.push_back(entry_path);
 		} else if (strcmp(type_str, "file") == 0) {
-			// Check if the full URL matches the pattern
+			string full_url =
+			    "gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref + "/" + entry_path;
 			if (::duckdb::Glob(full_url.c_str(), full_url.size(), full_pattern.c_str(), full_pattern.size())) {
-				results.emplace_back(full_url);
+				expanded_files.emplace_back(full_url);
 			}
 		}
 	}
 	yyjson_doc_free(doc);
+	return !pending_dirs.empty();
 }
 
-vector<OpenFileInfo> GithubFileSystem::Glob(const string &path, FileOpener *opener) {
-	if (!CanHandleFile(path)) {
-		return {};
-	}
-
-	// If no wildcard, just check existence
-	if (!FileSystem::HasGlob(path)) {
-		optional_ptr<FileOpener> opt_opener(opener);
-		if (FileExists(path, opt_opener)) {
-			return {OpenFileInfo(path)};
-		}
-		return {};
-	}
-
-	try {
-		auto pu = ParsedGHUrl::Parse(path);
-		optional_ptr<FileOpener> opt_opener(opener);
-		string token = GetToken(opt_opener);
-		// Use "HEAD" when no branch is given — GitHub API and raw.githubusercontent.com both accept it.
-		if (pu.ref.empty()) {
-			pu.ref = "HEAD";
-		}
-
-		// Build canonical pattern with resolved ref
-		string full_pattern = "gh://" + pu.owner + "/" + pu.repo + "@" + pu.ref + "/" + pu.path;
-
-		// Find the base directory (part before first wildcard in path)
-		string base_dir;
-		auto star_pos = pu.path.find_first_of("*?[");
-		if (star_pos != string::npos) {
-			auto last_slash = pu.path.rfind('/', star_pos);
-			if (last_slash != string::npos) {
-				base_dir = pu.path.substr(0, last_slash);
-			}
-			// if no slash before first wildcard, base_dir = "" (root of repo)
-		} else {
-			base_dir = pu.path;
-		}
-
-		vector<OpenFileInfo> results;
-		GlobRecursive(pu.owner, pu.repo, pu.ref, base_dir, full_pattern, results, token, opt_opener);
-		return results;
-	} catch (...) {
-		return {};
-	}
+unique_ptr<MultiFileList> GithubFileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
+                                                               optional_ptr<FileOpener> opener) {
+	return make_uniq<GithubGlobResult>(*this, path, opener);
 }
 
 } // namespace duckdb

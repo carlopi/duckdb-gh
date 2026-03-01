@@ -2,6 +2,7 @@
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 
 namespace duckdb {
 
@@ -48,7 +49,12 @@ public:
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
 	               FileOpener *opener = nullptr) override;
-	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
+
+	bool SupportsGlobExtended() const override {
+		return true;
+	}
+	unique_ptr<MultiFileList> GlobFilesExtended(const string &path, const FileGlobInput &input,
+	                                            optional_ptr<FileOpener> opener = nullptr) override;
 
 	void Seek(FileHandle &handle, idx_t location) override;
 	idx_t SeekPosition(FileHandle &handle) override;
@@ -56,18 +62,16 @@ public:
 		return false;
 	}
 
-private:
+	// Public so GithubGlobResult can call them
 	static string GetToken(optional_ptr<FileOpener> opener);
+	static string CallAPI(const string &url, const string &token, optional_ptr<FileOpener> opener,
+	                      bool *not_found = nullptr);
+
+private:
 	static string ResolveDefaultBranch(const string &owner, const string &repo, const string &token,
 	                                   optional_ptr<FileOpener> opener);
 	static void EnsureLoaded(GithubFileHandle &handle, optional_ptr<FileOpener> opener);
-	static string CallAPI(const string &url, const string &token, optional_ptr<FileOpener> opener,
-	                      bool *not_found = nullptr);
 	static string FetchRaw(const string &url, optional_ptr<FileOpener> opener);
-
-	void GlobRecursive(const string &owner, const string &repo, const string &ref, const string &dir,
-	                   const string &full_pattern, vector<OpenFileInfo> &results, const string &token,
-	                   optional_ptr<FileOpener> opener);
 };
 
 } // namespace duckdb
