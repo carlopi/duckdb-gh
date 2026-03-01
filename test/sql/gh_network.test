@@ -117,3 +117,59 @@ FROM (
 ----
 2	0	2	0	0
 16	0	16	0	0
+
+# ── LIMIT pushdown (BFS) ──────────────────────────────────────────────────────
+# GithubGlobResult is a LazyMultiFileList: ExpandNextPath() is called only
+# until enough files have been collected to satisfy the LIMIT — remaining
+# directories are never visited.  With LIMIT 3, BFS stops after the
+# stackoverflow subtree (5 requests) and never enters the d subtree.
+# GithubTreesGlobResult fetches the complete subtree in a single recursive
+# API call, so LIMIT has no effect on its request count (always 2).
+
+statement ok
+CALL enable_logging('HTTP');
+
+# BFS with LIMIT 3: early exit after finding the first 3 matching files
+statement ok
+SELECT * FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/*/*/*') LIMIT 3;
+
+# BFS without LIMIT: visits all directories in the crawl tree
+query I
+SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/*/*/*');
+----
+19
+
+# Trees with LIMIT 3: still fetches the whole subtree (2 GETs, same as full)
+statement ok
+SELECT * FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/**') LIMIT 3;
+
+# Trees without LIMIT: same 2 GETs
+query I
+SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/crawl/**');
+----
+168
+
+# BFS   limited: 5 GETs  (stackoverflow subtree only; d subtree skipped)
+# BFS   full:   25 GETs  (all directories visited)
+# Trees limited: 2 GETs  (LIMIT does not reduce Trees API request count)
+# Trees full:    2 GETs
+#
+# DESC LIMIT 4 isolates these four queries from any earlier logging context
+# in the same test session (prior context_ids are always smaller).
+query I
+FROM (
+    FROM (
+        FROM duckdb_logs_parsed('HTTP')
+        SELECT context_id, count(*) AS requests
+        GROUP BY context_id
+        ORDER BY context_id DESC
+        LIMIT 4
+    )
+    ORDER BY context_id
+)
+SELECT requests;
+----
+5
+25
+2
+2
