@@ -4,7 +4,10 @@
 
 namespace duckdb {
 
-// Returns the configured TableFunction for gh_repo().
+// gh_repo('owner/repo') — single VARCHAR argument
 TableFunction GithubRepoFunction();
+
+// gh_repos((SELECT ...)) — table in-out, one row per input 'owner/repo'
+TableFunction GithubReposFunction();
 
 } // namespace duckdb

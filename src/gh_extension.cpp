@@ -42,6 +42,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register table functions
 	loader.RegisterFunction(GithubRepoFunction());
+	loader.RegisterFunction(GithubReposFunction());
 
 	// Register GitHub filesystem
 	auto &db = loader.GetDatabaseInstance();
