@@ -16,7 +16,8 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/gh_extension.cpp
-    src/github_filesystem.cpp)
+    src/github_filesystem.cpp
+    src/github_functions.cpp)
 
 # yyjson headers bundled in DuckDB submodule
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/duckdb/third_party/yyjson/include)

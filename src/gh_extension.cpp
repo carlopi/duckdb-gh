@@ -2,6 +2,7 @@
 
 #include "gh_extension.hpp"
 #include "github_filesystem.hpp"
+#include "github_functions.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -38,6 +39,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 		return unique_ptr<BaseSecret>(std::move(s));
 	};
 	loader.RegisterFunction(github_secret_fn);
+
+	// Register table functions
+	loader.RegisterFunction(GithubRepoFunction());
 
 	// Register GitHub filesystem
 	auto &db = loader.GetDatabaseInstance();

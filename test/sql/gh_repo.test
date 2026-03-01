@@ -1,0 +1,68 @@
+# name: test/sql/gh_repo.test
+# description: test gh_repo() table in-out function against the live GitHub API
+# group: [sql]
+
+require-env GITHUB_TOKEN
+
+require gh
+
+statement ok
+SET autoinstall_known_extensions = true;
+
+statement ok
+SET autoload_known_extensions = true;
+
+# Single repo: full_name round-trips
+query I
+SELECT full_name FROM gh_repo((VALUES ('duckdb/duckdb')));
+----
+duckdb/duckdb
+
+# Multiple repos: correct row count
+query I
+SELECT count(*) FROM gh_repo((VALUES ('duckdb/duckdb'), ('duckdb/pg_duckdb')));
+----
+2
+
+# Numeric fields are non-negative
+query I
+SELECT stargazers_count > 0 FROM gh_repo((VALUES ('duckdb/duckdb')));
+----
+true
+
+# Timestamps are non-null
+query I
+SELECT created_at IS NOT NULL FROM gh_repo((VALUES ('duckdb/duckdb')));
+----
+true
+
+# owner field is extracted from owner.login
+query I
+SELECT owner FROM gh_repo((VALUES ('duckdb/duckdb')));
+----
+duckdb
+
+# Non-private public repo
+query I
+SELECT "private" FROM gh_repo((VALUES ('duckdb/duckdb')));
+----
+false
+
+# Repo language is C++
+query I
+SELECT language FROM gh_repo((VALUES ('duckdb/duckdb')));
+----
+C++
+
+# Multiple repos: names are correct
+query I
+SELECT name FROM gh_repo((VALUES ('duckdb/duckdb'), ('duckdb/pg_duckdb'))) ORDER BY name;
+----
+duckdb
+pg_duckdb
+
+# From a subquery (exercises the table-input path)
+query I
+SELECT count(*) FROM gh_repo((SELECT unnest(['duckdb/duckdb', 'duckdb/duckdb-wasm'])));
+----
+2
