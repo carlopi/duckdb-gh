@@ -92,6 +92,19 @@ WHERE full_name = 'duckdb/duckdb';
 ----
 true
 
+# ── unsupported glob patterns are rejected ───────────────────────────────────
+
+# partial glob in repo name is not supported
+statement error
+SELECT * FROM gh_repo('duckdb/duckdb*');
+----
+only '<org>/*' is supported as a wildcard pattern
+
+statement error
+SELECT * FROM gh_repos((VALUES ('duckdb/duckdb*')));
+----
+only '<org>/*' is supported as a wildcard pattern
+
 # ── gh_repos from a subquery ──────────────────────────────────────────────────
 
 query I

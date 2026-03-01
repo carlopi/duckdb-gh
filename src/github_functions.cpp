@@ -159,13 +159,20 @@ static vector<string> ListAllRepos(const string &owner, const string &token, opt
 static vector<string> ExpandRepoPattern(const string &pattern, const string &token, optional_ptr<FileOpener> opener) {
 	auto slash = pattern.find('/');
 	if (slash == string::npos) {
-		throw InvalidInputException("gh_repo: expected 'owner/repo' or 'owner/*', got '%s'", pattern);
+		throw InvalidInputException("gh_repo: expected '<org>/<repo>' or '<org>/*', got '%s'", pattern);
 	}
 	string owner = pattern.substr(0, slash);
 	string repo_part = pattern.substr(slash + 1);
 
 	if (repo_part == "*") {
 		return ListAllRepos(owner, token, opener);
+	}
+	// Reject partial globs like 'owner/prefix*' — only 'owner/*' is supported.
+	if (repo_part.find_first_of("*?[") != string::npos) {
+		throw InvalidInputException(
+		    "gh_repo: only '<org>/*' is supported as a wildcard pattern; got '%s'. "
+		    "Use '<org>/*' to list all repos for an org.",
+		    pattern);
 	}
 	return {pattern};
 }
@@ -178,7 +185,7 @@ static void FetchAndParseRepo(const string &repo_str, const string &token, optio
                               DataChunk &output, idx_t row) {
 	auto slash = repo_str.find('/');
 	if (slash == string::npos) {
-		throw InvalidInputException("gh_repo: expected 'owner/repo', got '%s'", repo_str);
+		throw InvalidInputException("gh_repo: expected '<org>/<repo>', got '%s'", repo_str);
 	}
 
 	string url = "https://api.github.com/repos/" + repo_str.substr(0, slash) + "/" + repo_str.substr(slash + 1);
@@ -256,10 +263,18 @@ static void FetchAndParseRepo(const string &repo_str, const string &token, optio
 }
 
 //===--------------------------------------------------------------------===//
-// gh_repo('owner/repo' | 'owner/*') — single VARCHAR, regular table function
+// gh_repo('<org>/<repo>' | '<org>/*') — single VARCHAR, regular table function
 //
-// 'owner/*' expands to all repos for the owner; emits one row per repo.
-// 'owner/repo' fetches exactly one repo.
+// SQL usage:
+//   SELECT * FROM gh_repo('duckdb/duckdb');
+//   SELECT name, stargazers_count FROM gh_repo('my-org/*') ORDER BY stargazers_count DESC;
+//
+// '<org>/<repo>'  — fetches metadata for exactly one repository (1 row).
+// '<org>/*'       — lists all repositories for the org/user and fetches
+//                   metadata for each one (N rows, one per repo).
+//
+// Partial wildcards such as '<org>/prefix*' are not supported and will
+// raise an InvalidInputException.
 //===--------------------------------------------------------------------===//
 
 struct GithubRepoBindData : public TableFunctionData {
@@ -312,10 +327,21 @@ static void GithubRepoScan(ClientContext &context, TableFunctionInput &data_p, D
 }
 
 //===--------------------------------------------------------------------===//
-// gh_repos((table)) — table in-out, one row per input 'owner/repo' or 'owner/*'
+// gh_repos((table)) — table in-out, one row per input '<org>/<repo>' or '<org>/*'
 //
-// 'owner/*' in an input row expands to all repos; HAVE_MORE_OUTPUT is used
-// when one input chunk produces more output rows than STANDARD_VECTOR_SIZE.
+// SQL usage:
+//   SELECT * FROM gh_repos((VALUES ('duckdb/duckdb'), ('duckdb/pg_duckdb')));
+//   SELECT * FROM gh_repos((SELECT repo_name FROM my_repos));
+//   SELECT * FROM gh_repos((VALUES ('my-org/*'), ('other-org/specific-repo')));
+//
+// Accepts a single-column VARCHAR table.  Each input row may be:
+//   '<org>/<repo>'  — fetches metadata for exactly one repository.
+//   '<org>/*'       — expands to all repositories for the org/user, then
+//                     fetches metadata for each one.
+//
+// HAVE_MORE_OUTPUT is returned when a single input chunk (after glob
+// expansion) produces more rows than STANDARD_VECTOR_SIZE, so the caller
+// receives all results across multiple output chunks.
 //===--------------------------------------------------------------------===//
 
 struct GithubReposBindData : public TableFunctionData {
@@ -331,7 +357,7 @@ struct GithubReposGlobalState : public GlobalTableFunctionState {
 static unique_ptr<FunctionData> GithubReposBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	if (input.input_table_types.size() != 1 || input.input_table_types[0] != LogicalType::VARCHAR) {
-		throw InvalidInputException("gh_repos expects a table with a single VARCHAR column ('owner/repo')");
+		throw InvalidInputException("gh_repos expects a table with a single VARCHAR column ('<org>/<repo>' or '<org>/*')");
 	}
 	SetRepoOutputSchema(return_types, names);
 	ClientContextFileOpener opener(context);

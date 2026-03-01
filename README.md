@@ -62,6 +62,88 @@ SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/**/*.csv');
 SELECT * FROM read_csv('gh://my-org/my-repo@main/data/**/*.csv');
 ```
 
+## Repository metadata functions
+
+Two table functions expose GitHub repository metadata as SQL rows.
+
+### `gh_repo('<org>/<repo>')` — single repository
+
+Returns one row of metadata for the given repository.
+
+```sql
+-- Metadata for a single repo
+SELECT name, stargazers_count, language, topics
+FROM gh_repo('duckdb/duckdb');
+
+-- Use it like any table — filter, join, aggregate
+SELECT description FROM gh_repo('my-org/my-repo')
+WHERE archived = false;
+```
+
+Pass `'<org>/*'` to expand to **all repositories** for an org or user:
+
+```sql
+-- All repos for an org, sorted by stars
+SELECT name, stargazers_count, language
+FROM gh_repo('duckdb/*')
+ORDER BY stargazers_count DESC;
+
+-- Count public repos by language
+SELECT language, count(*) AS n
+FROM gh_repo('my-org/*')
+WHERE NOT "private"
+GROUP BY language
+ORDER BY n DESC;
+```
+
+### `gh_repos((table))` — multiple repositories from a table
+
+A table in-out function that accepts any query returning a single VARCHAR column of `'<org>/<repo>'` strings and returns one metadata row per input row. `'<org>/*'` rows are expanded to all repos for that org.
+
+```sql
+-- Fixed list via VALUES
+SELECT name, stargazers_count
+FROM gh_repos((VALUES ('duckdb/duckdb'), ('duckdb/pg_duckdb'), ('duckdb/duckdb-wasm')))
+ORDER BY stargazers_count DESC;
+
+-- From a table column
+SELECT r.name, r.language, r.stargazers_count
+FROM my_repos, gh_repos((SELECT repo_name FROM my_repos)) r;
+
+-- Mix an org wildcard with specific repos
+SELECT name, full_name
+FROM gh_repos((VALUES ('my-org/*'), ('other-org/specific-repo')))
+ORDER BY name;
+```
+
+### Output columns
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `name` | VARCHAR | Repository name |
+| `full_name` | VARCHAR | `org/repo` |
+| `description` | VARCHAR | Repository description |
+| `owner` | VARCHAR | Owner login |
+| `private` | BOOLEAN | Whether the repository is private |
+| `fork` | BOOLEAN | Whether this is a fork |
+| `archived` | BOOLEAN | Whether the repository is archived |
+| `disabled` | BOOLEAN | Whether the repository is disabled |
+| `visibility` | VARCHAR | `public`, `private`, or `internal` |
+| `default_branch` | VARCHAR | Default branch name |
+| `language` | VARCHAR | Primary language |
+| `license` | VARCHAR | SPDX license identifier |
+| `homepage` | VARCHAR | Homepage URL |
+| `html_url` | VARCHAR | GitHub URL |
+| `topics` | VARCHAR[] | Repository topics |
+| `stargazers_count` | BIGINT | Star count |
+| `watchers_count` | BIGINT | Watcher count |
+| `forks_count` | BIGINT | Fork count |
+| `open_issues_count` | BIGINT | Open issue count |
+| `size` | BIGINT | Repository size in KB |
+| `created_at` | TIMESTAMP | Creation time |
+| `updated_at` | TIMESTAMP | Last update time |
+| `pushed_at` | TIMESTAMP | Last push time |
+
 ## Authentication
 
 Without a token the GitHub API allows 60 unauthenticated requests per hour. To get 5,000 requests per hour, create a secret with a [personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens):
