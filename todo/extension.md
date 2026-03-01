@@ -4,7 +4,38 @@ Improvements and open questions for the `gh://` filesystem extension.
 
 ---
 
-## 1 — Verify `ref=HEAD` behaviour when a branch is literally named "HEAD"
+## 1 — Plain-path reads make two network requests instead of one
+
+**Location:** `src/github_filesystem.cpp` — `GithubGlobResult` constructor, `GithubFileSystem::OpenFile`
+
+When a non-glob `gh://` path is passed to any file-reading function (e.g. `read_blob`,
+`read_parquet`, `read_csv`), DuckDB always calls `GlobFilesExtended` first, then `OpenFile`.
+The current implementation makes **two** round-trips:
+
+1. `GithubGlobResult` constructor — no glob characters detected → calls `FileExists`, which
+   issues a GET to the Contents API just to confirm the file exists.
+2. `OpenFile` → `EnsureLoaded` → `FetchFileContent` — issues a second GET to download the
+   same file.
+
+**Example:** `FROM read_blob('gh://duckdb/duckdb@main/data/parquet-testing/h2oai/h2oai_group_small.parquet')`
+currently triggers two identical requests to `api.github.com/repos/duckdb/duckdb/contents/…`.
+
+**Possible fixes:**
+
+- *Drop the existence check (simplest):* in `GithubGlobResult` constructor, for non-glob
+  paths skip `FileExists` and add the path to `expanded_files` unconditionally. `OpenFile`
+  will throw if the file does not exist. Minor behaviour change: `glob('gh://…/nonexistent')`
+  would return the path string instead of an empty list.
+
+- *Prefetch cache:* add a small `unordered_map<string, string>` on `GithubFileSystem`.
+  `GithubGlobResult` fetches the full content on the first call and stores it; `EnsureLoaded`
+  checks the cache before making a network request, moves the content into the handle, and
+  erases the entry. This preserves correct `glob()` semantics for missing files and reduces
+  the read path to a single request, at the cost of a short-lived in-memory copy.
+
+---
+
+## 2 — Verify `ref=HEAD` behaviour when a branch is literally named "HEAD"
 
 **Location:** `src/github_filesystem.cpp` — `GithubFileSystem::OpenFile` (and `FileExists`,
 `GithubGlobResult`, `GithubTreesGlobResult`)
