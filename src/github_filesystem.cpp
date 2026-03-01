@@ -114,6 +114,7 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 	HTTPUtil::DecomposeURL(url, path_out, proto_host_port);
 
 	HTTPHeaders headers = extra_headers;
+		std::cout << proto_host_port << "\t" << path_out << "\n";
 	GetRequestInfo request(proto_host_port + path_out, extra_headers, *params,
 	                       [](const HTTPResponse &) -> bool { return true; }, std::move(content_handler));
 
@@ -526,8 +527,121 @@ bool GithubGlobResult::ExpandNextPath() const {
 	return !pending_dirs.empty();
 }
 
+//===--------------------------------------------------------------------===//
+// GithubTreesGlobResult – LazyMultiFileList using Git Trees API
+//===--------------------------------------------------------------------===//
+
+// Used for patterns containing '**'. A single API call fetches the full
+// recursive tree; results are filtered client-side. No directory-level pruning
+// is possible once '**' is in the pattern, so the round-trip cost dominates.
+struct GithubTreesGlobResult : public LazyMultiFileList {
+public:
+	GithubTreesGlobResult(GithubFileSystem &fs, const string &glob_pattern, optional_ptr<FileOpener> opener);
+
+protected:
+	bool ExpandNextPath() const override;
+
+private:
+	GithubFileSystem &fs;
+	optional_ptr<FileOpener> opener;
+	mutable bool finished = false;
+
+	ParsedGHUrl parsed_url;
+	string full_pattern; // canonical pattern with ref for glob matching
+	string token;
+	string path_prefix; // base_dir + "/" used for cheap pre-filter
+};
+
+GithubTreesGlobResult::GithubTreesGlobResult(GithubFileSystem &fs_p, const string &glob_pattern,
+                                             optional_ptr<FileOpener> opener_p)
+    : LazyMultiFileList(FileOpener::TryGetClientContext(opener_p)), fs(fs_p), opener(opener_p) {
+
+	parsed_url = ParsedGHUrl::Parse(glob_pattern);
+	if (parsed_url.ref.empty()) {
+		parsed_url.ref = "HEAD";
+	}
+
+	full_pattern = "gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref + "/" + parsed_url.path;
+	token = GithubFileSystem::GetToken(opener);
+
+	// Derive the longest literal prefix before the first wildcard for cheap filtering
+	auto star_pos = parsed_url.path.find_first_of("*?[");
+	string base_dir;
+	if (star_pos != string::npos) {
+		auto last_slash = parsed_url.path.rfind('/', star_pos);
+		base_dir = (last_slash != string::npos) ? parsed_url.path.substr(0, last_slash) : "";
+	} else {
+		base_dir = parsed_url.path;
+	}
+	path_prefix = base_dir.empty() ? "" : (base_dir + "/");
+}
+
+bool GithubTreesGlobResult::ExpandNextPath() const {
+	if (finished) {
+		return false;
+	}
+	finished = true;
+
+	// Single call: GET /repos/{owner}/{repo}/git/trees/{ref}?recursive=1
+	string api_url = "https://api.github.com/repos/" + parsed_url.owner + "/" + parsed_url.repo + "/git/trees/" +
+	                 parsed_url.ref + "?recursive=1";
+
+	bool not_found = false;
+	string body = fs.CallAPI(api_url, token, opener, &not_found);
+	if (not_found || body.empty()) {
+		return false;
+	}
+
+	yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
+	if (!doc) {
+		return false;
+	}
+	yyjson_val *root = yyjson_doc_get_root(doc);
+	yyjson_val *tree_arr = yyjson_obj_get(root, "tree");
+	if (!tree_arr || !yyjson_is_arr(tree_arr)) {
+		yyjson_doc_free(doc);
+		return false;
+	}
+
+	yyjson_val *item;
+	size_t idx, max;
+	yyjson_arr_foreach(tree_arr, idx, max, item) {
+		yyjson_val *type_val = yyjson_obj_get(item, "type");
+		yyjson_val *path_val = yyjson_obj_get(item, "path");
+		if (!type_val || !path_val) {
+			continue;
+		}
+		const char *type_str = yyjson_get_str(type_val);
+		const char *entry_path = yyjson_get_str(path_val);
+		if (!type_str || !entry_path || strcmp(type_str, "blob") != 0) {
+			continue;
+		}
+		if (!path_prefix.empty() && !StringUtil::StartsWith(entry_path, path_prefix)) {
+			continue;
+		}
+		string full_url =
+		    "gh://" + parsed_url.owner + "/" + parsed_url.repo + "@" + parsed_url.ref + "/" + entry_path;
+		if (::duckdb::Glob(full_url.c_str(), full_url.size(), full_pattern.c_str(), full_pattern.size())) {
+			expanded_files.emplace_back(full_url);
+		}
+	}
+	yyjson_doc_free(doc);
+	return false;
+}
+
+//===--------------------------------------------------------------------===//
+// GlobFilesExtended – dispatch to Trees or BFS strategy
+//===--------------------------------------------------------------------===//
+
 unique_ptr<MultiFileList> GithubFileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
                                                                optional_ptr<FileOpener> opener) {
+	// '**' means unlimited depth — no directory pruning is possible, so pay
+	// one API call for the full recursive tree and filter client-side.
+	// Single-level wildcards ('*', '?', '[') keep enough structure for the
+	// BFS + SegmentMatch pruning to skip irrelevant subtrees.
+	if (StringUtil::Contains(path, "**")) {
+		return make_uniq<GithubTreesGlobResult>(*this, path, opener);
+	}
 	return make_uniq<GithubGlobResult>(*this, path, opener);
 }
 
