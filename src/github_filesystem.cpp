@@ -118,14 +118,14 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 		}
 	}
 
-
 	// Decompose URL into endpoint + path
 	string path_out, proto_host_port;
 	HTTPUtil::DecomposeURL(url, path_out, proto_host_port);
 
 	HTTPHeaders headers = extra_headers;
-	GetRequestInfo request(proto_host_port + path_out, extra_headers, *params,
-	                       [](const HTTPResponse &) -> bool { return true; }, std::move(content_handler));
+	GetRequestInfo request(
+	    proto_host_port + path_out, extra_headers, *params, [](const HTTPResponse &) -> bool { return true; },
+	    std::move(content_handler));
 
 	auto client = http_util.InitializeClient(*params, proto_host_port);
 	return client->Get(request);
@@ -174,11 +174,10 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 	}
 
 	string body;
-	auto response =
-	    MakeGetRequest(url, headers, opener, [&body](const_data_ptr_t data, idx_t len) -> bool {
-		    body.append(reinterpret_cast<const char *>(data), len);
-		    return true;
-	    });
+	auto response = MakeGetRequest(url, headers, opener, [&body](const_data_ptr_t data, idx_t len) -> bool {
+		body.append(reinterpret_cast<const char *>(data), len);
+		return true;
+	});
 
 	if (response->status == HTTPStatusCode::NotFound_404) {
 		if (not_found) {
@@ -188,8 +187,7 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 	}
 
 	// GitHub signals rate limits via 403 (primary) or 429 (secondary).
-	if (response->status == HTTPStatusCode::Forbidden_403 ||
-	    response->status == HTTPStatusCode::TooManyRequests_429) {
+	if (response->status == HTTPStatusCode::Forbidden_403 || response->status == HTTPStatusCode::TooManyRequests_429) {
 		// Try to extract GitHub's "message" field from the JSON body.
 		string gh_message;
 		yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
@@ -215,13 +213,14 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 			}
 		}
 
-		bool is_rate_limit =
-		    response->status == HTTPStatusCode::TooManyRequests_429 ||
-		    (!gh_message.empty() && (gh_message.find("rate limit") != string::npos ||
-		                             gh_message.find("secondary rate") != string::npos));
+		bool is_rate_limit = response->status == HTTPStatusCode::TooManyRequests_429 ||
+		                     (!gh_message.empty() && (gh_message.find("rate limit") != string::npos ||
+		                                              gh_message.find("secondary rate") != string::npos));
 
 		if (is_rate_limit) {
-			string token_hint = token.empty() ? " Set a GitHub token via CREATE SECRET (TYPE github, TOKEN '...') for a higher limit." : "";
+			string token_hint =
+			    token.empty() ? " Set a GitHub token via CREATE SECRET (TYPE github, TOKEN '...') for a higher limit."
+			                  : "";
 			throw IOException("GitHub API rate limit exceeded.%s%s", token_hint, reset_hint);
 		}
 	}
@@ -247,11 +246,10 @@ string GithubFileSystem::FetchRaw(const string &url, optional_ptr<FileOpener> op
 	//       and CallAPI paths are exercised).
 	HTTPHeaders headers;
 	string body;
-	auto response =
-	    MakeGetRequest(url, headers, opener, [&body](const_data_ptr_t data, idx_t len) -> bool {
-		    body.append(reinterpret_cast<const char *>(data), len);
-		    return true;
-	    });
+	auto response = MakeGetRequest(url, headers, opener, [&body](const_data_ptr_t data, idx_t len) -> bool {
+		body.append(reinterpret_cast<const char *>(data), len);
+		return true;
+	});
 
 	if (!response->Success()) {
 		throw IOException("Failed to fetch raw content from %s: %s", url, response->GetError());
@@ -311,7 +309,7 @@ bool GithubFileSystem::CanHandleFile(const string &fpath) {
 }
 
 unique_ptr<FileHandle> GithubFileSystem::OpenFile(const string &path, FileOpenFlags flags,
-                                                   optional_ptr<FileOpener> opener) {
+                                                  optional_ptr<FileOpener> opener) {
 	auto handle = make_uniq<GithubFileHandle>(*this, path, flags);
 	handle->parsed_url = ParsedGHUrl::Parse(path);
 
@@ -385,11 +383,11 @@ bool GithubFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 		// Use "HEAD" when no branch is given — raw.githubusercontent.com resolves it automatically.
 		const string &effective_ref = pu.ref.empty() ? "HEAD" : pu.ref;
 		// Check existence via raw.githubusercontent.com (avoids GitHub Contents API 403 / rate limits).
-		string raw_url = "https://raw.githubusercontent.com/" + pu.owner + "/" + pu.repo + "/" + effective_ref +
-		                 "/" + pu.path;
+		string raw_url =
+		    "https://raw.githubusercontent.com/" + pu.owner + "/" + pu.repo + "/" + effective_ref + "/" + pu.path;
 		// Discard body — we only need the HTTP status code.
-		auto response = MakeGetRequest(raw_url, HTTPHeaders {}, opener,
-		                               [](const_data_ptr_t, idx_t) -> bool { return true; });
+		auto response =
+		    MakeGetRequest(raw_url, HTTPHeaders {}, opener, [](const_data_ptr_t, idx_t) -> bool { return true; });
 		return response && response->status != HTTPStatusCode::NotFound_404 && response->Success();
 	} catch (...) {
 		return false;
@@ -397,7 +395,7 @@ bool GithubFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 }
 
 bool GithubFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
-                                  FileOpener *opener) {
+                                 FileOpener *opener) {
 	if (!CanHandleFile(directory)) {
 		return false;
 	}
@@ -409,8 +407,8 @@ bool GithubFileSystem::ListFiles(const string &directory, const std::function<vo
 			pu.ref = "HEAD";
 		}
 
-		string api_url = "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/contents/" + pu.path +
-		                 "?ref=" + pu.ref;
+		string api_url =
+		    "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/contents/" + pu.path + "?ref=" + pu.ref;
 		bool not_found = false;
 		string body = CallAPI(api_url, token, opt_opener, &not_found);
 		if (not_found || body.empty()) {
@@ -505,7 +503,7 @@ private:
 
 	// Resolved at construction
 	ParsedGHUrl parsed_url;
-	string full_pattern;         // canonical pattern with ref for glob matching
+	string full_pattern; // canonical pattern with ref for glob matching
 	string token;
 	vector<string> pattern_splits; // parsed_url.path split by '/' for SegmentMatch
 
@@ -515,7 +513,6 @@ private:
 GithubGlobResult::GithubGlobResult(GithubFileSystem &fs_p, const string &glob_pattern,
                                    optional_ptr<FileOpener> opener_p)
     : LazyMultiFileList(FileOpener::TryGetClientContext(opener_p)), fs(fs_p), opener(opener_p) {
-
 	if (!FileSystem::HasGlob(glob_pattern)) {
 		if (fs.FileExists(glob_pattern, opener)) {
 			expanded_files.emplace_back(glob_pattern);
@@ -599,12 +596,12 @@ bool GithubGlobResult::ExpandNextPath() const {
 		}
 	}
 	yyjson_doc_free(doc);
-       // Return true even when pending_dirs is now empty, so that GetFile() re-checks
-       // expanded_files.size() and sees any files added during this call.  The next
-       // invocation with an empty queue returns false immediately, correctly signalling
-       // completion.  (Returning false here causes GetFile to early-exit before
-       // re-evaluating the size condition, silently dropping the last batch of files.)
-       return true;
+	// Return true even when pending_dirs is now empty, so that GetFile() re-checks
+	// expanded_files.size() and sees any files added during this call.  The next
+	// invocation with an empty queue returns false immediately, correctly signalling
+	// completion.  (Returning false here causes GetFile to early-exit before
+	// re-evaluating the size condition, silently dropping the last batch of files.)
+	return true;
 }
 
 //===--------------------------------------------------------------------===//
@@ -628,14 +625,13 @@ private:
 
 	ParsedGHUrl parsed_url;
 	string token;
-	string path_prefix;           // base_dir + "/" (used to reconstruct full repo path from relative entry)
+	string path_prefix;            // base_dir + "/" (used to reconstruct full repo path from relative entry)
 	vector<string> pattern_splits; // parsed_url.path split by '/' for SegmentMatch
 };
 
 GithubTreesGlobResult::GithubTreesGlobResult(GithubFileSystem &fs_p, const string &glob_pattern,
                                              optional_ptr<FileOpener> opener_p)
     : LazyMultiFileList(FileOpener::TryGetClientContext(opener_p)), fs(fs_p), opener(opener_p) {
-
 	parsed_url = ParsedGHUrl::Parse(glob_pattern);
 	if (parsed_url.ref.empty()) {
 		parsed_url.ref = "HEAD";
@@ -660,8 +656,7 @@ GithubTreesGlobResult::GithubTreesGlobResult(GithubFileSystem &fs_p, const strin
 // the direct child named `segment`. Returns empty string if not found.
 static string FindChildTreeSha(GithubFileSystem &fs, const ParsedGHUrl &pu, const string &tree_sha,
                                const string &segment, const string &token, optional_ptr<FileOpener> opener) {
-	string api_url =
-	    "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/git/trees/" + tree_sha;
+	string api_url = "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/git/trees/" + tree_sha;
 	bool not_found = false;
 	string body = fs.CallAPI(api_url, token, opener, &not_found);
 	if (not_found || body.empty()) {
@@ -715,8 +710,8 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 	}
 
 	// One recursive fetch scoped to the base_dir subtree
-	string api_url = "https://api.github.com/repos/" + parsed_url.owner + "/" + parsed_url.repo +
-	                 "/git/trees/" + tree_sha + "?recursive=1";
+	string api_url = "https://api.github.com/repos/" + parsed_url.owner + "/" + parsed_url.repo + "/git/trees/" +
+	                 tree_sha + "?recursive=1";
 	bool not_found = false;
 	string body = fs.CallAPI(api_url, token, opener, &not_found);
 	if (not_found || body.empty()) {
@@ -814,7 +809,7 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 //   -- trees_limited should equal trees_full (both O(depth)+1)
 
 unique_ptr<MultiFileList> GithubFileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
-                                                               optional_ptr<FileOpener> opener) {
+                                                              optional_ptr<FileOpener> opener) {
 	// '**' means unlimited depth — no directory pruning is possible, so pay
 	// one API call for the full recursive tree and filter client-side.
 	// Single-level wildcards ('*', '?', '[') keep enough structure for the
