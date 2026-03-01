@@ -11,6 +11,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 using namespace duckdb_yyjson; // NOLINT
 
@@ -154,7 +155,7 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 	HTTPHeaders headers;
 	headers.Insert("Accept", "application/vnd.github+json");
 	headers.Insert("X-GitHub-Api-Version", "2022-11-28");
-headers.Insert("User-Agent", "HOHOHO");
+	headers.Insert("User-Agent", "duckdb-gh-extension");
 	if (!token.empty()) {
 		headers.Insert("Authorization", "Bearer " + token);
 	}
@@ -172,6 +173,46 @@ headers.Insert("User-Agent", "HOHOHO");
 		}
 		return "";
 	}
+
+	// GitHub signals rate limits via 403 (primary) or 429 (secondary).
+	if (response->status == HTTPStatusCode::Forbidden_403 ||
+	    response->status == HTTPStatusCode::TooManyRequests_429) {
+		// Try to extract GitHub's "message" field from the JSON body.
+		string gh_message;
+		yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
+		if (doc) {
+			yyjson_val *msg = yyjson_obj_get(yyjson_doc_get_root(doc), "message");
+			if (msg && yyjson_is_str(msg)) {
+				gh_message = yyjson_get_str(msg);
+			}
+			yyjson_doc_free(doc);
+		}
+
+		// Check reset time header.
+		string reset_hint;
+		string reset_val = response->GetHeaderValue("x-ratelimit-reset");
+		if (!reset_val.empty()) {
+			try {
+				time_t reset_ts = (time_t)std::stoll(reset_val);
+				char buf[64];
+				struct tm *tm_info = localtime(&reset_ts);
+				strftime(buf, sizeof(buf), "%H:%M:%S", tm_info);
+				reset_hint = string(" Rate limit resets at ") + buf + ".";
+			} catch (...) {
+			}
+		}
+
+		bool is_rate_limit =
+		    response->status == HTTPStatusCode::TooManyRequests_429 ||
+		    (!gh_message.empty() && (gh_message.find("rate limit") != string::npos ||
+		                             gh_message.find("secondary rate") != string::npos));
+
+		if (is_rate_limit) {
+			string token_hint = token.empty() ? " Set a GitHub token via CREATE SECRET (TYPE github, TOKEN '...') for a higher limit." : "";
+			throw IOException("GitHub API rate limit exceeded.%s%s", token_hint, reset_hint);
+		}
+	}
+
 	if (!response->Success()) {
 		throw IOException("GitHub API request to %s failed: %s", url, response->GetError());
 	}
