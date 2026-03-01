@@ -6,7 +6,32 @@ the authentication mechanism already in place (`CREATE SECRET TYPE github` /
 
 ---
 
+## Implemented
+
+### ✅ Repository metadata — `gh_repo` / `gh_repos`
+
+`GET /repos/{owner}/{repo}` — single repo or org-wide expansion.
+
+### ✅ Issues — `gh_issues`
+
+`GET /repos/{owner}/{repo}/issues` — paginated, PRs excluded, `state` filter.
+
+**Known limitation:** GitHub's REST API has a hard pagination offset limit for
+this endpoint. Repos with very large issue counts (e.g. >10k closed issues) will
+hit a 422 error before all results are returned. The GraphQL API (cursor-based)
+does not have this restriction and is the correct long-term fix.
+
+---
+
 ## Priority 1 — most useful for SQL analytics
+
+### Pull Requests — `GET /repos/{owner}/{repo}/pulls`
+
+Key fields: `number`, `title`, `state`, `draft`, `user.login`, `created_at`,
+`merged_at`, `closed_at`, `labels[].name`, `requested_reviewers[].login`,
+`additions`, `deletions`, `changed_files`, `review_comments`
+
+Same pagination limit caveat as issues applies.
 
 ### Commits — `GET /repos/{owner}/{repo}/commits`
 
@@ -14,20 +39,6 @@ Key fields: `sha`, `author.name`, `author.date`, `committer.date`, `message`,
 `stats.additions`, `stats.deletions`, `parents[].sha`
 
 Great for time-series analysis — commit frequency, author activity, churn over time.
-
-### Issues — `GET /repos/{owner}/{repo}/issues`
-
-Key fields: `number`, `title`, `state`, `state_reason`, `user.login`,
-`labels[].name`, `milestone.title`, `created_at`, `closed_at`, `comments`,
-`reactions`
-
-Note: the endpoint returns both issues **and** PRs; filter with `?pull_request=false`.
-
-### Pull Requests — `GET /repos/{owner}/{repo}/pulls`
-
-Key fields: `number`, `title`, `state`, `draft`, `user.login`, `created_at`,
-`merged_at`, `closed_at`, `labels[].name`, `requested_reviewers[].login`,
-`additions`, `deletions`, `changed_files`, `review_comments`
 
 ### Releases — `GET /repos/{owner}/{repo}/releases`
 
@@ -39,13 +50,6 @@ Download counts per asset make this particularly interesting for analytics.
 ---
 
 ## Priority 2 — useful, lower complexity
-
-### Repository info — `GET /repos/{owner}/{repo}`
-
-Key fields: `stargazers_count`, `forks_count`, `open_issues_count`, `size`,
-`language`, `topics[]`, `created_at`, `pushed_at`, `archived`, `license.spdx_id`
-
-Useful for cross-repo comparison dashboards.
 
 ### Contributors — `GET /repos/{owner}/{repo}/contributors`
 
@@ -86,10 +90,6 @@ Finer-grained than runs — useful for identifying slow or failing steps.
 
 Key fields: `environment`, `ref`, `sha`, `creator.login`, `created_at`,
 `statuses[].state`
-
-### Org repos & members — `GET /orgs/{org}/repos`, `/orgs/{org}/members`
-
-For org-wide analytics across many repos at once.
 
 ### Security alerts — `GET /repos/{owner}/{repo}/dependabot/alerts`, `/code-scanning/alerts`
 
