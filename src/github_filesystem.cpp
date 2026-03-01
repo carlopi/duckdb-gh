@@ -523,7 +523,12 @@ bool GithubGlobResult::ExpandNextPath() const {
 		}
 	}
 	yyjson_doc_free(doc);
-	return !pending_dirs.empty();
+       // Return true even when pending_dirs is now empty, so that GetFile() re-checks
+       // expanded_files.size() and sees any files added during this call.  The next
+       // invocation with an empty queue returns false immediately, correctly signalling
+       // completion.  (Returning false here causes GetFile to early-exit before
+       // re-evaluating the size condition, silently dropping the last batch of files.)
+       return true;
 }
 
 //===--------------------------------------------------------------------===//
