@@ -101,34 +101,38 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 	FileOpenerInfo info = {url};
 	auto params = http_util.InitializeParameters(opener, &info);
 
-	// TODO: verify HTTP logging works end-to-end.
-	// Suspected issue: the FileOpener / ClientContext chain may not be threaded through
-	// correctly for all call sites (e.g. GithubGlobResult::ExpandNextPath, which stores
-	// the opener at construction time but runs lazily). Suggested test:
+	// Always forward the client logger so that both the new structured logging path
+	// (CALL enable_logging('HTTP')) and the legacy path (SET enable_http_logging=true)
+	// produce entries in duckdb_logs().
+	//
+	// Background: InitializeParameters() gates logger assignment on enable_http_logging,
+	// which is only set by the legacy "SET enable_http_logging=true" pragma.  When the
+	// user calls "CALL enable_logging('HTTP')" instead, enable_http_logging stays false
+	// and InitializeParameters() leaves params->logger null, so no HTTP log entries are
+	// emitted.  By always assigning the logger here, we let ShouldLog() decide at
+	// call-time whether to emit — it returns true only when the 'HTTP' type is enabled at
+	// the appropriate level.
+	//
+	// Note: the opener is never null at this call site.  DuckDB's OpenerFileSystem
+	// wrapper (ClientFileSystem) injects a ClientContextFileOpener via GetOpener() before
+	// forwarding any FileSystem call, so all paths — direct reads, glob, etc. — arrive
+	// here with a valid opener.
+	//
+	// Suggested smoke test (after rebuilding):
 	//   CALL enable_logging('HTTP');
 	//   SELECT count(*) FROM glob('gh://duckdb/duckdb@main/data/csv/glob/**/*.csv');
-	//   SELECT * FROM duckdb_logs() WHERE type = 'HTTP';
-	// Expected: one log entry per API request. If 0 entries are produced the opener/logger
-	// is not being forwarded properly and needs to be re-examined.
+	//   SELECT count(*) FROM duckdb_logs() WHERE type = 'HTTP';
+	// Expected: one entry per API request (O(depth)+1 for the Trees strategy).
 	auto client_context = FileOpener::TryGetClientContext(opener);
 	if (client_context) {
-		auto &client_config = ClientConfig::GetConfig(*client_context);
-		if (client_config.enable_http_logging) {
-			params->logger = client_context->logger;
-		}
+		params->logger = client_context->logger;
 	}
 
-	// Decompose URL into endpoint + path
-	string path_out, proto_host_port;
-	HTTPUtil::DecomposeURL(url, path_out, proto_host_port);
-
-	HTTPHeaders headers = extra_headers;
-	GetRequestInfo request(
-	    proto_host_port + path_out, extra_headers, *params, [](const HTTPResponse &) -> bool { return true; },
-	    std::move(content_handler));
-
-	auto client = http_util.InitializeClient(*params, proto_host_port);
-	return client->Get(request);
+	// Route through HTTPUtil::Request → SendRequest → LogRequest so that HTTP
+	// log entries appear in duckdb_logs() when logging is enabled.
+	GetRequestInfo request(url, extra_headers, *params, [](const HTTPResponse &) -> bool { return true; },
+	                       std::move(content_handler));
+	return http_util.Request(request);
 }
 
 //===--------------------------------------------------------------------===//
@@ -761,8 +765,8 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 //===--------------------------------------------------------------------===//
 
 // TODO: add tests that verify the number of API requests made by each strategy.
-// Once HTTP logging is confirmed working (see the TODO in MakeGetRequest), use
-// duckdb_logs() to count requests:
+// HTTP logging works end-to-end (MakeGetRequest routes through HTTPUtil::Request →
+// SendRequest → LogRequest).  Use duckdb_logs() to count requests:
 //
 //   -- BFS: one request per visited directory. For the crawl fixture under d10
 //   -- the traversal visits: d10, d20/d21/d22, their mid/ dirs, and d40/d41/d42
