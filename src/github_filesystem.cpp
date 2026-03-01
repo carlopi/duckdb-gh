@@ -233,6 +233,18 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 }
 
 string GithubFileSystem::FetchRaw(const string &url, optional_ptr<FileOpener> opener) {
+	// TODO: verify private-repository access.
+	// raw.githubusercontent.com also requires authentication for private repos, but this
+	// function currently sends no Authorization header.  The token should be forwarded here
+	// just like CallAPI does.  Additionally, GitHub returns HTTP 404 (not 401/403) for
+	// private-repo requests made without a valid token, so a missing/wrong token silently
+	// looks like a missing file rather than an auth error — the error message should hint
+	// at this when a 404 is received and no token is configured.
+	// Suggested test: create a private repo, add a file, and verify that:
+	//   (a) SELECT * FROM 'gh://org/private-repo@main/file.csv'; fails with a clear message
+	//       when no token is set, and succeeds once a token is configured via CREATE SECRET.
+	//   (b) glob('gh://org/private-repo@main/**/*.csv') works end-to-end (both FetchRaw
+	//       and CallAPI paths are exercised).
 	HTTPHeaders headers;
 	string body;
 	auto response =
