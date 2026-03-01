@@ -96,6 +96,6 @@ GEN=ninja make -j$(nproc)
 Run tests (network tests require a `GITHUB_TOKEN` environment variable):
 
 ```sh
-build/release/test/unittest "test/sql/quack.test"
-GITHUB_TOKEN=$(gh auth token) build/release/test/unittest "test/sql/quack_gh_network.test"
+build/release/test/unittest "test/sql/gh.test"
+GITHUB_TOKEN=$(gh auth token) build/release/test/unittest "test/sql/gh_network.test"
 ```
