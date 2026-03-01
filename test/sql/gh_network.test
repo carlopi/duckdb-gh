@@ -30,6 +30,21 @@ FROM read_csv('gh://duckdb/duckdb/README.md', header=false, columns={content: VA
 ----
 true
 
+# ── parquet_metadata ─────────────────────────────────────────────────────────
+# Exercises GetLastModifiedTime (required by the multi-file infrastructure)
+# and the full open/read path for a binary file format.
+
+query I
+SELECT count(*) > 0 FROM parquet_metadata('gh://duckdb/duckdb@main/data/parquet-testing/userdata1.parquet');
+----
+true
+
+# Glob variant: metadata across all top-level parquet files in the directory
+query I
+SELECT count(*) > 0 FROM parquet_metadata('gh://duckdb/duckdb@main/data/parquet-testing/*.parquet');
+----
+true
+
 # ── BFS strategy (single-level wildcard, no '**') ────────────────────────────
 # Uses Contents API one directory at a time with SegmentMatch pruning.
 
