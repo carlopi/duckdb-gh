@@ -18,7 +18,7 @@ jobs:
     with:
       duckdb_version: v1.5-variegata
       ci_tools_version: v1.5-variegata
-      extension_name: quack
+      extension_name: gh
 
   code-quality-check:
     name: Code Quality Check
@@ -26,5 +26,5 @@ jobs:
     with:
       duckdb_version: v1.5-variegata
       ci_tools_version: v1.5-variegata
-      extension_name: quack
+      extension_name: gh
       format_checks: 'format;tidy'

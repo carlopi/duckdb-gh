@@ -5,7 +5,7 @@
 # Skip when GITHUB_TOKEN is not set (offline CI)
 require-env GITHUB_TOKEN
 
-require quack
+require gh
 
 statement ok
 SET autoinstall_known_extensions = true;
