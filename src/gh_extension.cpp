@@ -47,10 +47,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 		FunctionDescription desc;
 		desc.parameter_names = {"repo"};
 		desc.parameter_types = {LogicalType::VARCHAR};
-		desc.description =
-		    "Fetches GitHub repository metadata for a single repository or all repositories "
-		    "for an org/user. Pass 'owner/repo' for one repo, or 'owner/*' to expand to "
-		    "all repos belonging to that org or user.";
+		desc.description = "Fetches GitHub repository metadata for a single repository or all repositories "
+		                   "for an org/user. Pass 'owner/repo' for one repo, or 'owner/*' to expand to "
+		                   "all repos belonging to that org or user.";
 		desc.examples = {
 		    "SELECT name, stargazers_count, language FROM gh_repo('duckdb/duckdb');",
 		    "SELECT name, stargazers_count FROM gh_repo('my-org/*') ORDER BY stargazers_count DESC;",
@@ -66,11 +65,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 		FunctionDescription desc;
 		desc.parameter_names = {"repos"};
 		desc.parameter_types = {LogicalType::TABLE};
-		desc.description =
-		    "Table in-out function that fetches GitHub repository metadata for each "
-		    "'owner/repo' string in the input table. 'owner/*' rows are expanded to all "
-		    "repositories for that org or user. Accepts any subquery or VALUES list that "
-		    "returns a single VARCHAR column.";
+		desc.description = "Table in-out function that fetches GitHub repository metadata for each "
+		                   "'owner/repo' string in the input table. 'owner/*' rows are expanded to all "
+		                   "repositories for that org or user. Accepts any subquery or VALUES list that "
+		                   "returns a single VARCHAR column.";
 		desc.examples = {
 		    "SELECT name, stargazers_count FROM gh_repos((VALUES ('duckdb/duckdb'), ('duckdb/pg_duckdb')));",
 		    "SELECT r.name, r.language FROM my_repos, gh_repos((SELECT repo_name FROM my_repos)) r;",
@@ -86,11 +84,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 		FunctionDescription desc;
 		desc.parameter_names = {"repo"};
 		desc.parameter_types = {LogicalType::VARCHAR};
-		desc.description =
-		    "Fetches GitHub issues for a repository as a table, one row per issue. "
-		    "Pull requests are excluded. Paginates automatically. "
-		    "The optional 'state' parameter filters by issue state: "
-		    "'open' (default), 'closed', or 'all'.";
+		desc.description = "Fetches GitHub issues for a repository as a table, one row per issue. "
+		                   "Pull requests are excluded. Paginates automatically. "
+		                   "The optional 'state' parameter filters by issue state: "
+		                   "'open' (default), 'closed', or 'all'.";
 		desc.examples = {
 		    "SELECT number, title, user FROM gh_issues('duckdb/duckdb');",
 		    "SELECT number, title FROM gh_issues('duckdb/duckdb', state := 'closed') ORDER BY closed_at DESC;",

@@ -61,36 +61,54 @@ static Value ParseTimestampVal(yyjson_val *v) {
 //===--------------------------------------------------------------------===//
 
 static void SetRepoOutputSchema(vector<LogicalType> &return_types, vector<string> &names) {
-	names = {"name",      "full_name",          "description",     "owner",             "private",
-	         "fork",      "archived",           "disabled",        "visibility",        "default_branch",
-	         "language",  "license",            "homepage",        "html_url",          "topics",
-	         "stargazers_count", "watchers_count", "forks_count", "open_issues_count", "size",
-	         "created_at", "updated_at",        "pushed_at"};
+	names = {"name",
+	         "full_name",
+	         "description",
+	         "owner",
+	         "private",
+	         "fork",
+	         "archived",
+	         "disabled",
+	         "visibility",
+	         "default_branch",
+	         "language",
+	         "license",
+	         "homepage",
+	         "html_url",
+	         "topics",
+	         "stargazers_count",
+	         "watchers_count",
+	         "forks_count",
+	         "open_issues_count",
+	         "size",
+	         "created_at",
+	         "updated_at",
+	         "pushed_at"};
 
 	return_types = {
-	    LogicalType::VARCHAR,                   // name
-	    LogicalType::VARCHAR,                   // full_name
-	    LogicalType::VARCHAR,                   // description
-	    LogicalType::VARCHAR,                   // owner
-	    LogicalType::BOOLEAN,                   // private
-	    LogicalType::BOOLEAN,                   // fork
-	    LogicalType::BOOLEAN,                   // archived
-	    LogicalType::BOOLEAN,                   // disabled
-	    LogicalType::VARCHAR,                   // visibility
-	    LogicalType::VARCHAR,                   // default_branch
-	    LogicalType::VARCHAR,                   // language
-	    LogicalType::VARCHAR,                   // license
-	    LogicalType::VARCHAR,                   // homepage
-	    LogicalType::VARCHAR,                   // html_url
+	    LogicalType::VARCHAR,                    // name
+	    LogicalType::VARCHAR,                    // full_name
+	    LogicalType::VARCHAR,                    // description
+	    LogicalType::VARCHAR,                    // owner
+	    LogicalType::BOOLEAN,                    // private
+	    LogicalType::BOOLEAN,                    // fork
+	    LogicalType::BOOLEAN,                    // archived
+	    LogicalType::BOOLEAN,                    // disabled
+	    LogicalType::VARCHAR,                    // visibility
+	    LogicalType::VARCHAR,                    // default_branch
+	    LogicalType::VARCHAR,                    // language
+	    LogicalType::VARCHAR,                    // license
+	    LogicalType::VARCHAR,                    // homepage
+	    LogicalType::VARCHAR,                    // html_url
 	    LogicalType::LIST(LogicalType::VARCHAR), // topics
-	    LogicalType::BIGINT,                    // stargazers_count
-	    LogicalType::BIGINT,                    // watchers_count
-	    LogicalType::BIGINT,                    // forks_count
-	    LogicalType::BIGINT,                    // open_issues_count
-	    LogicalType::BIGINT,                    // size
-	    LogicalType::TIMESTAMP,                 // created_at
-	    LogicalType::TIMESTAMP,                 // updated_at
-	    LogicalType::TIMESTAMP,                 // pushed_at
+	    LogicalType::BIGINT,                     // stargazers_count
+	    LogicalType::BIGINT,                     // watchers_count
+	    LogicalType::BIGINT,                     // forks_count
+	    LogicalType::BIGINT,                     // open_issues_count
+	    LogicalType::BIGINT,                     // size
+	    LogicalType::TIMESTAMP,                  // created_at
+	    LogicalType::TIMESTAMP,                  // updated_at
+	    LogicalType::TIMESTAMP,                  // pushed_at
 	};
 }
 
@@ -169,10 +187,9 @@ static vector<string> ExpandRepoPattern(const string &pattern, const string &tok
 	}
 	// Reject partial globs like 'owner/prefix*' — only 'owner/*' is supported.
 	if (repo_part.find_first_of("*?[") != string::npos) {
-		throw InvalidInputException(
-		    "gh_repo: only '<org>/*' is supported as a wildcard pattern; got '%s'. "
-		    "Use '<org>/*' to list all repos for an org.",
-		    pattern);
+		throw InvalidInputException("gh_repo: only '<org>/*' is supported as a wildcard pattern; got '%s'. "
+		                            "Use '<org>/*' to list all repos for an org.",
+		                            pattern);
 	}
 	return {pattern};
 }
@@ -349,7 +366,7 @@ struct GithubReposBindData : public TableFunctionData {
 };
 
 struct GithubReposGlobalState : public GlobalTableFunctionState {
-	vector<string> pending;      // expanded repos waiting to be fetched
+	vector<string> pending; // expanded repos waiting to be fetched
 	idx_t current = 0;
 	bool chunk_processed = false; // whether current input chunk was expanded
 };
@@ -357,7 +374,8 @@ struct GithubReposGlobalState : public GlobalTableFunctionState {
 static unique_ptr<FunctionData> GithubReposBind(ClientContext &context, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	if (input.input_table_types.size() != 1 || input.input_table_types[0] != LogicalType::VARCHAR) {
-		throw InvalidInputException("gh_repos expects a table with a single VARCHAR column ('<org>/<repo>' or '<org>/*')");
+		throw InvalidInputException(
+		    "gh_repos expects a table with a single VARCHAR column ('<org>/<repo>' or '<org>/*')");
 	}
 	SetRepoOutputSchema(return_types, names);
 	ClientContextFileOpener opener(context);
@@ -417,26 +435,25 @@ static OperatorResultType GithubReposInOut(ExecutionContext &context, TableFunct
 //===--------------------------------------------------------------------===//
 
 static void SetIssueOutputSchema(vector<LogicalType> &return_types, vector<string> &names) {
-	names = {"number",     "title",   "state",      "state_reason", "body",       "user",
-	         "labels",     "assignees", "milestone", "locked",       "comments",   "created_at",
-	         "updated_at", "closed_at", "html_url"};
+	names = {"number",    "title",  "state",    "state_reason", "body",       "user",      "labels",  "assignees",
+	         "milestone", "locked", "comments", "created_at",   "updated_at", "closed_at", "html_url"};
 
 	return_types = {
-	    LogicalType::BIGINT,                    // number
-	    LogicalType::VARCHAR,                   // title
-	    LogicalType::VARCHAR,                   // state
-	    LogicalType::VARCHAR,                   // state_reason (nullable)
-	    LogicalType::VARCHAR,                   // body (nullable)
-	    LogicalType::VARCHAR,                   // user (login)
+	    LogicalType::BIGINT,                     // number
+	    LogicalType::VARCHAR,                    // title
+	    LogicalType::VARCHAR,                    // state
+	    LogicalType::VARCHAR,                    // state_reason (nullable)
+	    LogicalType::VARCHAR,                    // body (nullable)
+	    LogicalType::VARCHAR,                    // user (login)
 	    LogicalType::LIST(LogicalType::VARCHAR), // labels
 	    LogicalType::LIST(LogicalType::VARCHAR), // assignees
-	    LogicalType::VARCHAR,                   // milestone (nullable)
-	    LogicalType::BOOLEAN,                   // locked
-	    LogicalType::BIGINT,                    // comments
-	    LogicalType::TIMESTAMP,                 // created_at
-	    LogicalType::TIMESTAMP,                 // updated_at
-	    LogicalType::TIMESTAMP,                 // closed_at (nullable)
-	    LogicalType::VARCHAR,                   // html_url
+	    LogicalType::VARCHAR,                    // milestone (nullable)
+	    LogicalType::BOOLEAN,                    // locked
+	    LogicalType::BIGINT,                     // comments
+	    LogicalType::TIMESTAMP,                  // created_at
+	    LogicalType::TIMESTAMP,                  // updated_at
+	    LogicalType::TIMESTAMP,                  // closed_at (nullable)
+	    LogicalType::VARCHAR,                    // html_url
 	};
 }
 
@@ -528,7 +545,7 @@ struct GithubIssuesScanState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> GithubIssuesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	SetIssueOutputSchema(return_types, names);
 
 	auto repo_str = input.inputs[0].ToString();
@@ -545,8 +562,8 @@ static unique_ptr<FunctionData> GithubIssuesBind(ClientContext &context, TableFu
 	if (it != input.named_parameters.end() && !it->second.IsNull()) {
 		state_val = it->second.ToString();
 		if (state_val != "open" && state_val != "closed" && state_val != "all") {
-			throw InvalidInputException(
-			    "gh_issues: invalid state '%s'; expected 'open', 'closed', or 'all'", state_val);
+			throw InvalidInputException("gh_issues: invalid state '%s'; expected 'open', 'closed', or 'all'",
+			                            state_val);
 		}
 	}
 
@@ -573,8 +590,8 @@ static void GithubIssuesScan(ClientContext &context, TableFunctionInput &data_p,
 	}
 
 	ClientContextFileOpener opener(context);
-	string url = "https://api.github.com/repos/" + bind.owner + "/" + bind.repo +
-	             "/issues?state=" + bind.state + "&per_page=100&page=" + std::to_string(state.page);
+	string url = "https://api.github.com/repos/" + bind.owner + "/" + bind.repo + "/issues?state=" + bind.state +
+	             "&per_page=100&page=" + std::to_string(state.page);
 
 	bool not_found = false;
 	string body;
@@ -585,11 +602,10 @@ static void GithubIssuesScan(ClientContext &context, TableFunctionInput &data_p,
 		// limit for this endpoint. Re-raise with actionable guidance.
 		string msg(e.what());
 		if (msg.find("Unprocessable") != string::npos) {
-			throw IOException(
-			    "gh_issues: GitHub REST API pagination limit reached for '%s/%s' (state='%s'). "
-			    "The REST API cannot return results beyond a certain offset. "
-			    "Try narrowing the result set: use state='open' or state='closed' instead of 'all'.",
-			    bind.owner, bind.repo, bind.state);
+			throw IOException("gh_issues: GitHub REST API pagination limit reached for '%s/%s' (state='%s'). "
+			                  "The REST API cannot return results beyond a certain offset. "
+			                  "Try narrowing the result set: use state='open' or state='closed' instead of 'all'.",
+			                  bind.owner, bind.repo, bind.state);
 		}
 		throw;
 	}
