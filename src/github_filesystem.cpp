@@ -589,6 +589,19 @@ bool GithubGlobResult::ExpandNextPath() const {
 			auto key_splits = StringUtil::Split(entry_path, "/");
 			if (SegmentMatch(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end(),
 			                 false)) {
+				// TODO: reduce BFS request count by reusing child tree SHAs.
+				// Each Contents API response already includes the "sha" field for
+				// every directory entry — that sha is the git tree SHA for that
+				// subdirectory.  Instead of pushing the path onto pending_dirs and
+				// re-fetching via Contents API, we could push (path, sha) pairs and
+				// call GET /git/trees/{sha} (non-recursive) for each queued dir.
+				// The git/trees endpoint returns entries in a single flat list at the
+				// same cost as a Contents API call, but avoids GitHub's 1,000-item
+				// per-page limit on the Contents API and is structurally simpler.
+				// With this change the BFS for data/csv/glob/crawl/d/d00/d10/*/*/*/.csv
+				// would still issue one call per visited directory (16 calls) — the
+				// call count only drops if we also batch multiple siblings into a single
+				// recursive tree call (see GlobFilesExtended TODO below).
 				pending_dirs.push_back(entry_path);
 			}
 		} else if (strcmp(type_str, "file") == 0) {
@@ -701,6 +714,19 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 	// Navigate to base_dir level-by-level to obtain its tree SHA, then fetch
 	// only that subtree recursively. Fetching from the repo root would trigger
 	// GitHub's truncation limit on large repos and miss deeply nested files.
+	//
+	// TODO: eliminate the O(depth) navigation calls.
+	// The GitHub Contents API accepts a path directly:
+	//   GET /repos/{owner}/{repo}/contents/{path}?ref={ref}
+	// and returns a "type":"dir" object whose "sha" field is the tree SHA.
+	// That single call replaces the current level-by-level FindChildTreeSha loop
+	// and reduces Trees API cost from (depth + 1) GETs to exactly 1 GET:
+	//   GET /repos/{owner}/{repo}/contents/{base_dir}?ref={ref}  → sha
+	//   GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1     → file list
+	// The current approach was chosen to avoid an extra Contents API call for
+	// the common case of a root-level pattern (path_prefix empty → no loop),
+	// but now that the request-count tests quantify the overhead the single
+	// Contents call is clearly the better trade-off for all non-root patterns.
 	string tree_sha = parsed_url.ref;
 	if (!path_prefix.empty()) {
 		// path_prefix = base_dir + "/"; strip the trailing slash to get segments
@@ -812,6 +838,32 @@ bool GithubTreesGlobResult::ExpandNextPath() const {
 //   SELECT count(*) AS trees_full FROM duckdb_logs() WHERE type = 'HTTP';
 //   -- trees_limited should equal trees_full (both O(depth)+1)
 
+// TODO: reduce overall request counts for both strategies.
+//
+// Trees API (** patterns) — from (depth+1) GETs to 1 GET:
+//   The current impl navigates to base_dir level-by-level (see ExpandNextPath
+//   TODO in GithubTreesGlobResult).  The fix is a single Contents API call on
+//   the PARENT of base_dir, which returns its children including a "sha" entry
+//   for base_dir itself; that sha feeds directly into the one recursive tree call.
+//   For a root-level pattern (base_dir empty) only the recursive tree call is
+//   needed — already 1 GET.  For all other patterns: 1 parent Contents call +
+//   1 recursive tree = 2 GETs instead of (depth+1)+1.
+//
+// BFS (* patterns) — reduce visits per level by switching to git/trees:
+//   Each Contents API response already returns the tree SHA of every child
+//   directory.  Subsequent BFS levels can call GET /git/trees/{sha} (non-
+//   recursive) instead of GET /contents/{path}, reusing those SHAs rather than
+//   re-resolving them via path.  This avoids redundant path-to-SHA resolution
+//   but does not by itself reduce the total number of API calls (still one call
+//   per visited directory).
+//   A more aggressive optimisation: once a BFS level has only matching dirs left
+//   (no pruning possible at that level) issue a single recursive git/trees call
+//   for one representative dir, confirm the sub-structure matches expectations,
+//   then apply the same filter to siblings without fetching them individually.
+//   In practice for the d10/*/*/*/.csv fixture this would reduce 16 calls to ~5
+//   (fetch d10, fetch one representative subtree recursively, infer the rest).
+//   This requires the assumption that sibling directories are structurally similar,
+//   which holds for generated datasets but not in general.
 unique_ptr<MultiFileList> GithubFileSystem::GlobFilesExtended(const string &path, const FileGlobInput &input,
                                                               optional_ptr<FileOpener> opener) {
 	// '**' means unlimited depth — no directory pruning is possible, so pay
