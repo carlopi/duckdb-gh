@@ -674,73 +674,74 @@ GithubTreesGlobResult::GithubTreesGlobResult(GithubFileSystem &fs_p, const strin
 	path_prefix = base_dir.empty() ? "" : (base_dir + "/");
 }
 
-// Fetch the git tree object at `tree_sha` (non-recursive) and find the SHA of
-// the direct child named `segment`. Returns empty string if not found.
-static string FindChildTreeSha(GithubFileSystem &fs, const ParsedGHUrl &pu, const string &tree_sha,
-                               const string &segment, const string &token, optional_ptr<FileOpener> opener) {
-	string api_url = "https://api.github.com/repos/" + pu.owner + "/" + pu.repo + "/git/trees/" + tree_sha;
-	bool not_found = false;
-	string body = fs.CallAPI(api_url, token, opener, &not_found);
-	if (not_found || body.empty()) {
-		return "";
-	}
-	yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
-	if (!doc) {
-		return "";
-	}
-	yyjson_val *root = yyjson_doc_get_root(doc);
-	yyjson_val *tree_arr = yyjson_obj_get(root, "tree");
-	string child_sha;
-	if (tree_arr && yyjson_is_arr(tree_arr)) {
-		yyjson_val *item;
-		size_t idx, max;
-		yyjson_arr_foreach(tree_arr, idx, max, item) {
-			yyjson_val *path_val = yyjson_obj_get(item, "path");
-			yyjson_val *sha_val = yyjson_obj_get(item, "sha");
-			if (!path_val || !sha_val) {
-				continue;
-			}
-			if (segment == yyjson_get_str(path_val)) {
-				child_sha = yyjson_get_str(sha_val);
-				break;
-			}
-		}
-	}
-	yyjson_doc_free(doc);
-	return child_sha;
-}
-
 bool GithubTreesGlobResult::ExpandNextPath() const {
 	if (finished) {
 		return false;
 	}
 	finished = true;
 
-	// Navigate to base_dir level-by-level to obtain its tree SHA, then fetch
-	// only that subtree recursively. Fetching from the repo root would trigger
-	// GitHub's truncation limit on large repos and miss deeply nested files.
+	// Resolve the tree SHA for base_dir, then fetch only that subtree
+	// recursively.  Fetching from the repo root would trigger GitHub's
+	// truncation limit on large repos and miss deeply nested files.
 	//
-	// TODO: eliminate the O(depth) navigation calls.
-	// The GitHub Contents API accepts a path directly:
-	//   GET /repos/{owner}/{repo}/contents/{path}?ref={ref}
-	// and returns a "type":"dir" object whose "sha" field is the tree SHA.
-	// That single call replaces the current level-by-level FindChildTreeSha loop
-	// and reduces Trees API cost from (depth + 1) GETs to exactly 1 GET:
-	//   GET /repos/{owner}/{repo}/contents/{base_dir}?ref={ref}  → sha
-	//   GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1     → file list
-	// The current approach was chosen to avoid an extra Contents API call for
-	// the common case of a root-level pattern (path_prefix empty → no loop),
-	// but now that the request-count tests quantify the overhead the single
-	// Contents call is clearly the better trade-off for all non-root patterns.
-	string tree_sha = parsed_url.ref;
+	// When base_dir is non-empty we obtain its tree SHA in a single Contents
+	// API call to its parent directory — the parent listing includes a "sha"
+	// field for each child entry which is exactly the git tree SHA we need.
+	// This replaces the previous O(depth) level-by-level navigation loop and
+	// brings the total cost to 1 GET (root patterns) or 2 GETs (all others):
+	//   root pattern:     GET /git/trees/{ref}?recursive=1
+	//   non-root pattern: GET /contents/{parent}?ref={ref}  → sha
+	//                     GET /git/trees/{sha}?recursive=1
+	string tree_sha = parsed_url.ref; // used directly for root-level patterns
 	if (!path_prefix.empty()) {
-		// path_prefix = base_dir + "/"; strip the trailing slash to get segments
-		auto segments = StringUtil::Split(path_prefix.substr(0, path_prefix.size() - 1), "/");
-		for (const auto &segment : segments) {
-			tree_sha = FindChildTreeSha(fs, parsed_url, tree_sha, segment, token, opener);
-			if (tree_sha.empty()) {
-				return false; // base_dir does not exist
+		// path_prefix = base_dir + "/"; recover base_dir
+		string base_dir = path_prefix.substr(0, path_prefix.size() - 1);
+
+		// Split into parent path and the final segment of base_dir.
+		auto last_slash = base_dir.rfind('/');
+		string parent_dir = (last_slash == string::npos) ? "" : base_dir.substr(0, last_slash);
+		string last_segment = (last_slash == string::npos) ? base_dir : base_dir.substr(last_slash + 1);
+
+		// Fetch the parent directory listing — one Contents API call regardless
+		// of how many segments base_dir has.
+		string api_url = "https://api.github.com/repos/" + parsed_url.owner + "/" + parsed_url.repo + "/contents/" +
+		                 parent_dir + "?ref=" + parsed_url.ref;
+		bool not_found = false;
+		string body = fs.CallAPI(api_url, token, opener, &not_found);
+		if (not_found || body.empty()) {
+			return false;
+		}
+
+		yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
+		if (!doc) {
+			return false;
+		}
+		yyjson_val *arr = yyjson_doc_get_root(doc);
+		if (!yyjson_is_arr(arr)) {
+			yyjson_doc_free(doc);
+			return false;
+		}
+
+		tree_sha.clear(); // will be set if we find last_segment below
+		yyjson_val *item;
+		size_t idx, max;
+		yyjson_arr_foreach(arr, idx, max, item) {
+			yyjson_val *name_val = yyjson_obj_get(item, "name");
+			yyjson_val *sha_val = yyjson_obj_get(item, "sha");
+			if (!name_val || !sha_val) {
+				continue;
 			}
+			const char *name_str = yyjson_get_str(name_val);
+			const char *sha_str = yyjson_get_str(sha_val);
+			if (name_str && sha_str && last_segment == name_str) {
+				tree_sha = sha_str;
+				break;
+			}
+		}
+		yyjson_doc_free(doc);
+
+		if (tree_sha.empty()) {
+			return false; // base_dir does not exist
 		}
 	}
 

@@ -84,8 +84,8 @@ true
 # Verify that each glob strategy makes the expected number of API calls and
 # uses only GET requests (never HEAD, POST, or PUT).
 #
-# Trees API (** pattern): O(depth)+1 calls.  Base dir is data/csv/glob → 3
-# navigation requests (data, csv, glob) + 1 recursive tree fetch = 4 total.
+# Trees API (** pattern): 2 calls.  1 Contents API call to the parent of
+# base_dir (data/csv) to resolve base_dir's tree SHA + 1 recursive tree fetch.
 #
 # BFS (* pattern): one Contents API call per visited directory.  The pattern
 # data/csv/glob/crawl/d/d00/d10/*/*/*/*.csv visits 16 directories total.
@@ -115,5 +115,5 @@ FROM (
     ORDER BY context_id
 ) WHERE post == 0;
 ----
-4	0	4	0	0
+2	0	2	0	0
 16	0	16	0	0
