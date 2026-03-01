@@ -128,9 +128,19 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 		params->logger = client_context->logger;
 	}
 
+	// Build request headers: start from DB-level defaults (which includes the
+	// DuckDB User-Agent from db.config.UserAgent()), then overlay the caller's
+	// extra headers (Accept, Authorization, etc.).  HTTPHeaders::Insert uses
+	// map::insert which does not overwrite, so caller headers added after the
+	// DB-level ones take precedence for any key not already present.
+	HTTPHeaders merged_headers(*db);
+	for (const auto &h : extra_headers) {
+		merged_headers.Insert(h.first, h.second);
+	}
+
 	// Route through HTTPUtil::Request → SendRequest → LogRequest so that HTTP
 	// log entries appear in duckdb_logs() when logging is enabled.
-	GetRequestInfo request(url, extra_headers, *params, [](const HTTPResponse &) -> bool { return true; },
+	GetRequestInfo request(url, merged_headers, *params, [](const HTTPResponse &) -> bool { return true; },
 	                       std::move(content_handler));
 	return http_util.Request(request);
 }
@@ -168,11 +178,6 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
 	HTTPHeaders headers;
 	headers.Insert("Accept", "application/vnd.github+json");
 	headers.Insert("X-GitHub-Api-Version", "2022-11-28");
-	// TODO: verify whether the User-Agent should come from HTTPUtil automatically
-	// (it does in httpfs when HTTPUtil is initialised correctly via InitializeParameters).
-	// If the opener / ClientContext chain is set up properly, HTTPUtil may already
-	// inject a DuckDB User-Agent and this explicit header can be removed.
-	headers.Insert("User-Agent", "duckdb-gh-extension");
 	if (!token.empty()) {
 		headers.Insert("Authorization", "Bearer " + token);
 	}
