@@ -9,7 +9,8 @@
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
-#include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
@@ -40,9 +41,44 @@ static void LoadInternal(ExtensionLoader &loader) {
 	};
 	loader.RegisterFunction(github_secret_fn);
 
-	// Register table functions
-	loader.RegisterFunction(GithubRepoFunction());
-	loader.RegisterFunction(GithubReposFunction());
+	// Register gh_repo('owner/repo') with inline description and examples
+	{
+		CreateTableFunctionInfo info(GithubRepoFunction());
+		FunctionDescription desc;
+		desc.parameter_names = {"repo"};
+		desc.parameter_types = {LogicalType::VARCHAR};
+		desc.description =
+		    "Fetches GitHub repository metadata for a single repository or all repositories "
+		    "for an org/user. Pass 'owner/repo' for one repo, or 'owner/*' to expand to "
+		    "all repos belonging to that org or user.";
+		desc.examples = {
+		    "SELECT name, stargazers_count, language FROM gh_repo('duckdb/duckdb');",
+		    "SELECT name, stargazers_count FROM gh_repo('my-org/*') ORDER BY stargazers_count DESC;",
+		};
+		desc.categories = {"github"};
+		info.descriptions.push_back(std::move(desc));
+		loader.RegisterFunction(std::move(info));
+	}
+
+	// Register gh_repos((table)) with inline description and examples
+	{
+		CreateTableFunctionInfo info(GithubReposFunction());
+		FunctionDescription desc;
+		desc.parameter_names = {"repos"};
+		desc.parameter_types = {LogicalType::TABLE};
+		desc.description =
+		    "Table in-out function that fetches GitHub repository metadata for each "
+		    "'owner/repo' string in the input table. 'owner/*' rows are expanded to all "
+		    "repositories for that org or user. Accepts any subquery or VALUES list that "
+		    "returns a single VARCHAR column.";
+		desc.examples = {
+		    "SELECT name, stargazers_count FROM gh_repos((VALUES ('duckdb/duckdb'), ('duckdb/pg_duckdb')));",
+		    "SELECT r.name, r.language FROM my_repos, gh_repos((SELECT repo_name FROM my_repos)) r;",
+		};
+		desc.categories = {"github"};
+		info.descriptions.push_back(std::move(desc));
+		loader.RegisterFunction(std::move(info));
+	}
 
 	// Register GitHub filesystem
 	auto &db = loader.GetDatabaseInstance();
