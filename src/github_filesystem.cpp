@@ -140,8 +140,8 @@ static unique_ptr<HTTPResponse> MakeGetRequest(const string &url, const HTTPHead
 
 	// Route through HTTPUtil::Request → SendRequest → LogRequest so that HTTP
 	// log entries appear in duckdb_logs() when logging is enabled.
-	GetRequestInfo request(url, merged_headers, *params, [](const HTTPResponse &) -> bool { return true; },
-	                       std::move(content_handler));
+	GetRequestInfo request(
+	    url, merged_headers, *params, [](const HTTPResponse &) -> bool { return true; }, std::move(content_handler));
 	return http_util.Request(request);
 }
 
