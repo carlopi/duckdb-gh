@@ -30,6 +30,38 @@ FROM read_csv('gh://duckdb/duckdb/README.md', header=false, columns={content: VA
 ----
 true
 
+# ── File format readers ───────────────────────────────────────────────────────
+
+# CSV: single file, inferred schema
+query II
+SELECT column0, typeof(column0) FROM read_csv('gh://duckdb/duckdb@main/data/csv/test/date.csv');
+----
+2019-06-05	DATE
+
+# CSV: multi-file glob — read_csv over a BFS-expanded wildcard pattern
+query II
+SELECT count(*), max(column0) FROM read_csv('gh://duckdb/duckdb@main/data/csv/glob/crawl/d/d00/d10/d20/mid/d40/*.csv');
+----
+1	42
+
+# Parquet: read rows (not just metadata)
+query I
+SELECT count(*) FROM read_parquet('gh://duckdb/duckdb@main/data/parquet-testing/userdata1.parquet');
+----
+1000
+
+# NDJSON: newline-delimited JSON, one object per line
+query II
+SELECT count(*), max(id) FROM read_json('gh://duckdb/duckdb@main/data/json/example_n.ndjson');
+----
+5	5
+
+# JSONL: large newline-delimited file
+query I
+SELECT count(*) FROM read_json('gh://duckdb/duckdb@main/data/json/5000.jsonl');
+----
+5000
+
 # ── parquet_metadata ─────────────────────────────────────────────────────────
 # Exercises GetLastModifiedTime (required by the multi-file infrastructure)
 # and the full open/read path for a binary file format.
