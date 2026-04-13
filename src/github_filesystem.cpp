@@ -177,7 +177,6 @@ string GithubFileSystem::CallAPI(const string &url, const string &token, optiona
                                  bool *not_found) {
 	HTTPHeaders headers;
 	headers.Insert("Accept", "application/vnd.github+json");
-	headers.Insert("X-GitHub-Api-Version", "2022-11-28");
 	if (!token.empty()) {
 		headers.Insert("Authorization", "Bearer " + token);
 	}
@@ -249,7 +248,6 @@ static string FetchFileContent(const string &owner, const string &repo, const st
 	string api_url = "https://api.github.com/repos/" + owner + "/" + repo + "/contents/" + path + "?ref=" + ref;
 	HTTPHeaders headers;
 	headers.Insert("Accept", "application/vnd.github.raw");
-	headers.Insert("X-GitHub-Api-Version", "2022-11-28");
 	if (!token.empty()) {
 		headers.Insert("Authorization", "Bearer " + token);
 	}
@@ -412,7 +410,6 @@ bool GithubFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 		                 "?ref=" + effective_ref;
 		HTTPHeaders headers;
 		headers.Insert("Accept", "application/vnd.github.raw");
-		headers.Insert("X-GitHub-Api-Version", "2022-11-28");
 		if (!token.empty()) {
 			headers.Insert("Authorization", "Bearer " + token);
 		}
