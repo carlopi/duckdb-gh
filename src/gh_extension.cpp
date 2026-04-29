@@ -98,6 +98,27 @@ static void LoadInternal(ExtensionLoader &loader) {
 		loader.RegisterFunction(std::move(info));
 	}
 
+	// Register gh_prs('owner/repo') with inline description and examples
+	{
+		CreateTableFunctionInfo info(GithubPullsFunction());
+		FunctionDescription desc;
+		desc.parameter_names = {"repo"};
+		desc.parameter_types = {LogicalType::VARCHAR};
+		desc.description = "Fetches GitHub pull requests for a repository as a table, one row per PR. "
+		                   "Paginates automatically. The optional 'state' parameter filters by PR state: "
+		                   "'open' (default), 'closed', or 'all'. Includes 'author_association' "
+		                   "(the same signal as the 'Member'/'Owner'/'Contributor' badge in the GitHub UI).";
+		desc.examples = {
+		    "SELECT number, title, user FROM gh_prs('duckdb/duckdb');",
+		    "SELECT number, user FROM gh_prs('duckdb/community-extensions', state := 'all') "
+		    "WHERE author_association IN ('MEMBER', 'OWNER');",
+		    "SELECT count(*) FROM gh_prs('duckdb/duckdb', state := 'all');",
+		};
+		desc.categories = {"github"};
+		info.descriptions.push_back(std::move(desc));
+		loader.RegisterFunction(std::move(info));
+	}
+
 	// Register GitHub filesystem
 	auto &db = loader.GetDatabaseInstance();
 	auto &db_fs = db.GetFileSystem();

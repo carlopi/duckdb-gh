@@ -655,6 +655,288 @@ static void GithubIssuesScan(ClientContext &context, TableFunctionInput &data_p,
 }
 
 //===--------------------------------------------------------------------===//
+// gh_prs('<org>/<repo>') — paginated pull request listing
+//
+// SQL usage:
+//   SELECT * FROM gh_prs('duckdb/duckdb');
+//   SELECT number, user, author_association FROM gh_prs('duckdb/community-extensions', state := 'all')
+//     WHERE author_association IN ('MEMBER', 'OWNER');
+//
+// Returns one row per pull request. Paginates automatically (100/page).
+// Default state is 'open'. Valid values: 'open', 'closed', 'all'.
+//===--------------------------------------------------------------------===//
+
+static void SetPullOutputSchema(vector<LogicalType> &return_types, vector<string> &names) {
+	names = {"number",   "title",     "state",    "draft",    "body",      "user",          "author_association",
+	         "labels",   "assignees", "reviewers", "milestone", "head_ref", "head_sha",     "head_repo",
+	         "base_ref", "base_sha",  "locked",   "created_at", "updated_at", "closed_at", "merged_at",
+	         "html_url"};
+
+	return_types = {
+	    LogicalType::BIGINT,                     // number
+	    LogicalType::VARCHAR,                    // title
+	    LogicalType::VARCHAR,                    // state
+	    LogicalType::BOOLEAN,                    // draft
+	    LogicalType::VARCHAR,                    // body (nullable)
+	    LogicalType::VARCHAR,                    // user (login)
+	    LogicalType::VARCHAR,                    // author_association
+	    LogicalType::LIST(LogicalType::VARCHAR), // labels
+	    LogicalType::LIST(LogicalType::VARCHAR), // assignees
+	    LogicalType::LIST(LogicalType::VARCHAR), // requested_reviewers
+	    LogicalType::VARCHAR,                    // milestone (nullable)
+	    LogicalType::VARCHAR,                    // head_ref
+	    LogicalType::VARCHAR,                    // head_sha
+	    LogicalType::VARCHAR,                    // head_repo (full_name, nullable for deleted forks)
+	    LogicalType::VARCHAR,                    // base_ref
+	    LogicalType::VARCHAR,                    // base_sha
+	    LogicalType::BOOLEAN,                    // locked
+	    LogicalType::TIMESTAMP,                  // created_at
+	    LogicalType::TIMESTAMP,                  // updated_at
+	    LogicalType::TIMESTAMP,                  // closed_at (nullable)
+	    LogicalType::TIMESTAMP,                  // merged_at (nullable)
+	    LogicalType::VARCHAR,                    // html_url
+	};
+}
+
+// Helper: extract a string field from a nested object (e.g. head.ref)
+static Value GetNestedStr(yyjson_val *root, const char *outer, const char *inner) {
+	yyjson_val *obj = yyjson_obj_get(root, outer);
+	if (!obj || yyjson_is_null(obj)) {
+		return Value(LogicalType::VARCHAR);
+	}
+	return GetStrVal(obj, inner);
+}
+
+static void ParsePullRow(yyjson_val *item, DataChunk &output, idx_t row) {
+	output.SetValue(0, row, GetIntVal(item, "number"));
+	output.SetValue(1, row, GetStrVal(item, "title"));
+	output.SetValue(2, row, GetStrVal(item, "state"));
+	output.SetValue(3, row, GetBoolVal(item, "draft"));
+	output.SetValue(4, row, GetStrVal(item, "body"));
+
+	// user.login
+	{
+		yyjson_val *user = yyjson_obj_get(item, "user");
+		Value user_val(LogicalType::VARCHAR);
+		if (user && !yyjson_is_null(user)) {
+			yyjson_val *login = yyjson_obj_get(user, "login");
+			if (login && yyjson_is_str(login)) {
+				user_val = Value(yyjson_get_str(login));
+			}
+		}
+		output.SetValue(5, row, user_val);
+	}
+
+	output.SetValue(6, row, GetStrVal(item, "author_association"));
+
+	// labels[].name
+	{
+		vector<Value> labels;
+		yyjson_val *arr = yyjson_obj_get(item, "labels");
+		if (arr && yyjson_is_arr(arr)) {
+			yyjson_val *lbl;
+			size_t i, m;
+			yyjson_arr_foreach(arr, i, m, lbl) {
+				yyjson_val *name = yyjson_obj_get(lbl, "name");
+				if (name && yyjson_is_str(name)) {
+					labels.emplace_back(Value(yyjson_get_str(name)));
+				}
+			}
+		}
+		output.SetValue(7, row, Value::LIST(LogicalType::VARCHAR, labels));
+	}
+
+	// assignees[].login
+	{
+		vector<Value> assignees;
+		yyjson_val *arr = yyjson_obj_get(item, "assignees");
+		if (arr && yyjson_is_arr(arr)) {
+			yyjson_val *a;
+			size_t i, m;
+			yyjson_arr_foreach(arr, i, m, a) {
+				yyjson_val *login = yyjson_obj_get(a, "login");
+				if (login && yyjson_is_str(login)) {
+					assignees.emplace_back(Value(yyjson_get_str(login)));
+				}
+			}
+		}
+		output.SetValue(8, row, Value::LIST(LogicalType::VARCHAR, assignees));
+	}
+
+	// requested_reviewers[].login
+	{
+		vector<Value> reviewers;
+		yyjson_val *arr = yyjson_obj_get(item, "requested_reviewers");
+		if (arr && yyjson_is_arr(arr)) {
+			yyjson_val *r;
+			size_t i, m;
+			yyjson_arr_foreach(arr, i, m, r) {
+				yyjson_val *login = yyjson_obj_get(r, "login");
+				if (login && yyjson_is_str(login)) {
+					reviewers.emplace_back(Value(yyjson_get_str(login)));
+				}
+			}
+		}
+		output.SetValue(9, row, Value::LIST(LogicalType::VARCHAR, reviewers));
+	}
+
+	// milestone.title
+	{
+		yyjson_val *ms = yyjson_obj_get(item, "milestone");
+		Value ms_val(LogicalType::VARCHAR);
+		if (ms && !yyjson_is_null(ms)) {
+			yyjson_val *title = yyjson_obj_get(ms, "title");
+			if (title && yyjson_is_str(title)) {
+				ms_val = Value(yyjson_get_str(title));
+			}
+		}
+		output.SetValue(10, row, ms_val);
+	}
+
+	// head.ref / head.sha / head.repo.full_name
+	output.SetValue(11, row, GetNestedStr(item, "head", "ref"));
+	output.SetValue(12, row, GetNestedStr(item, "head", "sha"));
+	{
+		yyjson_val *head = yyjson_obj_get(item, "head");
+		Value head_repo(LogicalType::VARCHAR);
+		if (head && !yyjson_is_null(head)) {
+			yyjson_val *repo = yyjson_obj_get(head, "repo");
+			if (repo && !yyjson_is_null(repo)) {
+				yyjson_val *full = yyjson_obj_get(repo, "full_name");
+				if (full && yyjson_is_str(full)) {
+					head_repo = Value(yyjson_get_str(full));
+				}
+			}
+		}
+		output.SetValue(13, row, head_repo);
+	}
+
+	// base.ref / base.sha
+	output.SetValue(14, row, GetNestedStr(item, "base", "ref"));
+	output.SetValue(15, row, GetNestedStr(item, "base", "sha"));
+
+	output.SetValue(16, row, GetBoolVal(item, "locked"));
+	output.SetValue(17, row, ParseTimestampVal(yyjson_obj_get(item, "created_at")));
+	output.SetValue(18, row, ParseTimestampVal(yyjson_obj_get(item, "updated_at")));
+	output.SetValue(19, row, ParseTimestampVal(yyjson_obj_get(item, "closed_at")));
+	output.SetValue(20, row, ParseTimestampVal(yyjson_obj_get(item, "merged_at")));
+	output.SetValue(21, row, GetStrVal(item, "html_url"));
+}
+
+struct GithubPullsBindData : public TableFunctionData {
+	string token;
+	string owner;
+	string repo;
+	string state; // "open", "closed", or "all"
+};
+
+struct GithubPullsScanState : public GlobalTableFunctionState {
+	int page = 1;
+	bool done = false;
+};
+
+static unique_ptr<FunctionData> GithubPullsBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<string> &names) {
+	SetPullOutputSchema(return_types, names);
+
+	auto repo_str = input.inputs[0].ToString();
+	auto slash = repo_str.find('/');
+	if (slash == string::npos) {
+		throw InvalidInputException("gh_prs: expected '<org>/<repo>', got '%s'", repo_str);
+	}
+	if (repo_str.find_first_of("*?[") != string::npos) {
+		throw InvalidInputException("gh_prs: glob patterns are not supported; expected '<org>/<repo>'");
+	}
+
+	string state_val = "open";
+	auto it = input.named_parameters.find("state");
+	if (it != input.named_parameters.end() && !it->second.IsNull()) {
+		state_val = it->second.ToString();
+		if (state_val != "open" && state_val != "closed" && state_val != "all") {
+			throw InvalidInputException("gh_prs: invalid state '%s'; expected 'open', 'closed', or 'all'", state_val);
+		}
+	}
+
+	ClientContextFileOpener opener(context);
+	auto bind_data = make_uniq<GithubPullsBindData>();
+	bind_data->token = GithubFileSystem::GetToken(&opener);
+	bind_data->owner = repo_str.substr(0, slash);
+	bind_data->repo = repo_str.substr(slash + 1);
+	bind_data->state = state_val;
+	return bind_data;
+}
+
+static unique_ptr<GlobalTableFunctionState> GithubPullsInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<GithubPullsScanState>();
+}
+
+static void GithubPullsScan(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind = data_p.bind_data->Cast<GithubPullsBindData>();
+	auto &state = data_p.global_state->Cast<GithubPullsScanState>();
+
+	if (state.done) {
+		output.SetCardinality(0);
+		return;
+	}
+
+	ClientContextFileOpener opener(context);
+	string url = "https://api.github.com/repos/" + bind.owner + "/" + bind.repo + "/pulls?state=" + bind.state +
+	             "&per_page=100&page=" + std::to_string(state.page);
+
+	bool not_found = false;
+	string body;
+	try {
+		body = GithubFileSystem::CallAPI(url, bind.token, &opener, &not_found);
+	} catch (IOException &e) {
+		string msg(e.what());
+		if (msg.find("Unprocessable") != string::npos) {
+			throw IOException("gh_prs: GitHub REST API pagination limit reached for '%s/%s' (state='%s'). "
+			                  "Try narrowing: use state='open' or state='closed' instead of 'all'.",
+			                  bind.owner, bind.repo, bind.state);
+		}
+		throw;
+	}
+	if (not_found) {
+		throw IOException("gh_prs: repository '%s/%s' not found", bind.owner, bind.repo);
+	}
+	if (body.empty()) {
+		state.done = true;
+		output.SetCardinality(0);
+		return;
+	}
+
+	yyjson_doc *doc = yyjson_read(body.c_str(), body.size(), YYJSON_READ_NOFLAG);
+	if (!doc) {
+		state.done = true;
+		output.SetCardinality(0);
+		return;
+	}
+	yyjson_val *arr = yyjson_doc_get_root(doc);
+	if (!yyjson_is_arr(arr)) {
+		yyjson_doc_free(doc);
+		state.done = true;
+		output.SetCardinality(0);
+		return;
+	}
+
+	idx_t api_count = yyjson_arr_size(arr);
+	idx_t out_row = 0;
+	yyjson_val *item;
+	size_t idx, max;
+	yyjson_arr_foreach(arr, idx, max, item) {
+		ParsePullRow(item, output, out_row++);
+	}
+	output.SetCardinality(out_row);
+	yyjson_doc_free(doc);
+
+	if (api_count < 100) {
+		state.done = true;
+	} else {
+		state.page++;
+	}
+}
+
+//===--------------------------------------------------------------------===//
 // Factories
 //===--------------------------------------------------------------------===//
 
@@ -674,6 +956,13 @@ TableFunction GithubReposFunction() {
 TableFunction GithubIssuesFunction() {
 	TableFunction fn("gh_issues", {LogicalType::VARCHAR}, GithubIssuesScan, GithubIssuesBind);
 	fn.init_global = GithubIssuesInit;
+	fn.named_parameters["state"] = LogicalType::VARCHAR;
+	return fn;
+}
+
+TableFunction GithubPullsFunction() {
+	TableFunction fn("gh_prs", {LogicalType::VARCHAR}, GithubPullsScan, GithubPullsBind);
+	fn.init_global = GithubPullsInit;
 	fn.named_parameters["state"] = LogicalType::VARCHAR;
 	return fn;
 }

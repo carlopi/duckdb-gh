@@ -13,4 +13,7 @@ TableFunction GithubReposFunction();
 // gh_issues('owner/repo') — paginated issue listing (excludes pull requests)
 TableFunction GithubIssuesFunction();
 
+// gh_prs('owner/repo') — paginated pull request listing
+TableFunction GithubPullsFunction();
+
 } // namespace duckdb
